@@ -27,7 +27,7 @@ var natsUrl = "nats://127.0.0.1:4222";
 
 await using server = new XelerateServer(natsUrl);
 await server.StartAsync();
-
+// Group nếu không có thì tất cả client sẽ nhận được tất cả request
 await using var client = new XelerateClient(natsUrl, "Worker-1");
 await client.StartAsync();
 
