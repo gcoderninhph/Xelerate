@@ -1,5 +1,10 @@
 # Mục đích dự án
-Dự án này được tạo ra nhằm mục đích cung cấp một hệ thống xử lý sự kiện phân tán (Event-Driven) hiệu quả và dễ dàng tích hợp cho các ứng dụng game hoặc ứng dụng thời gian thực khác. Hệ thống sử dụng NATS làm nền tảng giao tiếp, cho phép các client gửi dữ liệu và nhận phản hồi một cách bất đồng bộ, giúp tối ưu hóa hiệu suất và khả năng mở rộng.
+Dự án này được tạo ra nhằm mục đích cung cấp một hệ thống sự kiện phản hồi trên 1 khoảng thời gian được cài đặt trước.
+
+#### Các trường hợp hợp sử dụng
+- Game: Xử lý các hành động chờ, vd: xây dựng, nâng cấp, hồi sinh, buff/debuff...
+- Hệ thống nhắc nhở: Gửi thông báo vào một thời điểm nhất định trong tương lai.
+- Hệ thống tự động: Tự động thực thi một tác vụ nào đó vào một thời điểm nhất định, vd: tự động backup dữ liệu, tự động gửi email
 
 # 🚀 NATS Event Processing - Client Integration Guide
 
@@ -23,7 +28,7 @@ var natsUrl = "nats://127.0.0.1:4222";
 await using server = new XelerateServer(natsUrl);
 await server.StartAsync();
 
-await using var client = new XelerateClient(natsUrl);
+await using var client = new XelerateClient(natsUrl, "Worker-1");
 await client.StartAsync();
 
 // 2. Tạo Request Handler cho một loại đối tượng cụ thể

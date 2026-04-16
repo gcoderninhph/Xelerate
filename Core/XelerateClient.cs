@@ -44,13 +44,15 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
     private readonly Channel<ProcessPayload> _receiveChannel = Channel.CreateUnbounded<ProcessPayload>();
     private readonly Channel<SendQueueItem> _sendChannel = Channel.CreateUnbounded<SendQueueItem>();
     const int MaxBatchSize = 50 * 1024; // 50KB
+    private string? _group;
 
 
-    public XelerateClient(string natsUrl)
+    public XelerateClient(string natsUrl, string? group = null)
     {
         _nats = new NatsConnection(new NatsOpts { Url = natsUrl });
         DefaultObjectPoolProvider provider = new();
         _payloadPool = provider.Create(new XeleratePayloadPooledObjectPolicy());
+        _group = group;
     }
 
     public async Task StartAsync()
@@ -88,7 +90,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         var ct = _cts.Token;
         try
         {
-            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("XelerateClientSubject",
+            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("XelerateClientSubject", queueGroup: _group,
                                cancellationToken: ct))
             {
                 using var memoryOwner = msg.Data;
