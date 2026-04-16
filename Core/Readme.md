@@ -97,7 +97,7 @@ byte[] data = Encoding.UTF8.GetBytes("Data của Monster 99");
 long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000; 
 
 // Gửi lên Server (Sẽ trigger OnDone sau 5 giây)
-await monsterRequest.Send(regionId, unitId, version, targetTimeMs, data);
+monsterRequest.Send(regionId, unitId, version, targetTimeMs, data);
 ```
 
 ### 💓 `Ping` (Duy trì kết nối & Kiểm tra đồng bộ)
@@ -109,7 +109,7 @@ Bạn cần gọi `Ping` định kỳ để:
 
 ```csharp
 // Gửi Ping. Nếu Server không biết Unit này hoặc lệch Version, nó sẽ kích hoạt sự kiện OnRequire.
-await monsterRequest.Ping(regionId, unitId, version);
+monsterRequest.Ping(regionId, unitId, version);
 ```
 
 ### ❌ `Cancel` (Hủy bỏ tức thời)
@@ -117,7 +117,7 @@ Nếu bạn không muốn đợi đến khi `TimeTargetMs` kết thúc và muố
 Sự kiện `OnDone` sẽ KHÔNG BAO GIỜ được gọi cho UnitId này nữa.
 
 ```csharp
-await monsterRequest.Cancel(regionId, unitId, version);
+monsterRequest.Cancel(regionId, unitId, version);
 ```
 
 ---
