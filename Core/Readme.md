@@ -1,3 +1,6 @@
+# Mục đích dự án
+Dự án này được tạo ra nhằm mục đích cung cấp một hệ thống xử lý sự kiện phân tán (Event-Driven) hiệu quả và dễ dàng tích hợp cho các ứng dụng game hoặc ứng dụng thời gian thực khác. Hệ thống sử dụng NATS làm nền tảng giao tiếp, cho phép các client gửi dữ liệu và nhận phản hồi một cách bất đồng bộ, giúp tối ưu hóa hiệu suất và khả năng mở rộng.
+
 # 🚀 NATS Event Processing - Client Integration Guide
 
 Tài liệu này hướng dẫn chi tiết cách tích hợp và sử dụng `XelerateClient` để giao tiếp với hệ thống xử lý sự kiện phân tán (Event-Driven) qua NATS.
