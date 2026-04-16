@@ -175,7 +175,7 @@ public class Region : IAsyncDisposable
                 var size = payload.CalculateSize();
                 var byteData = ArrayPool<byte>.Shared.Rent(size);
                 payload.WriteTo(byteData.AsSpan(0, size));
-                await _nats.PublishAsync("ProcessClient", byteData.AsMemory(0, size),
+                await _nats.PublishAsync("XelerateClientSubject", byteData.AsMemory(0, size),
                     cancellationToken: ct);
             }
             finally

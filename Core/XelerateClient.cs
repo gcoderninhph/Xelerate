@@ -88,7 +88,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         var ct = _cts.Token;
         try
         {
-            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("ProcessClient",
+            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("XelerateClientSubject",
                                cancellationToken: ct))
             {
                 using var memoryOwner = msg.Data;
@@ -185,7 +185,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
             try
             {
                 payload.WriteTo(buffer.AsSpan(0, size));
-                await _nats.PublishAsync($"ProcessServer.Region.{payload.RegionId}", buffer.AsMemory(0, size));
+                await _nats.PublishAsync($"XelerateServerSubject.Region.{payload.RegionId}", buffer.AsMemory(0, size));
             }
             finally
             {

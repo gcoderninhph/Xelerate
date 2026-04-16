@@ -16,7 +16,7 @@ public class XelerateServer(string natsUrl) : IAsyncDisposable
 
         _ = Task.Run(async () =>
         {
-            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("ProcessServer.Region.*",
+            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("XelerateServerSubject.Region.*",
                                cancellationToken: ct))
             {
                 var subject = msg.Subject;
