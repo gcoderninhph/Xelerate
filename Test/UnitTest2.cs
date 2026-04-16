@@ -66,7 +66,7 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1000;
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(3000));
         Assert.True(completedTask == tcs.Task, "Timeout: Không nhận được sự kiện OnDone.");
@@ -91,7 +91,7 @@ public class UnitTest2 : IAsyncLifetime
             if (res.UnitId == unitId) doneTcs.TrySetResult(true);
         });
 
-        await _request.Ping(_testRegionId, unitId, 1);
+        _request.Ping(_testRegionId, unitId, 1);
 
         Assert.True(await Task.WhenAny(requireTcs.Task, Task.Delay(2000)) == requireTcs.Task,
             "Không trigger OnRequire");
@@ -113,11 +113,11 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000;
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
         await Task.Delay(200);
 
         // Cố tình Ping lệch version
-        await _request.Ping(_testRegionId, unitId, 2);
+        _request.Ping(_testRegionId, unitId, 2);
 
         var completedTask = await Task.WhenAny(needUpdateTcs.Task, Task.Delay(3000));
         Assert.True(completedTask == needUpdateTcs.Task, "Server không phát hiện lệch version.");
@@ -135,10 +135,10 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1500;
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         await Task.Delay(200);
-        await _request.Cancel(_testRegionId, unitId, 1);
+        _request.Cancel(_testRegionId, unitId, 1);
 
         // Chờ quá target time
         await Task.Delay(2000);
@@ -164,7 +164,7 @@ public class UnitTest2 : IAsyncLifetime
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 10000;
 
         var watch = System.Diagnostics.Stopwatch.StartNew();
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(2000));
         watch.Stop();
@@ -189,13 +189,13 @@ public class UnitTest2 : IAsyncLifetime
 
         // Đặt target là 20s (để không bị nổ Done)
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 20000;
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         // Đợi 11 giây (Vượt quá 10s timeout hardcode của Server)
         await Task.Delay(11000);
 
         // Gửi Ping, lúc này Server đã xóa -> phải báo Require
-        await _request.Ping(_testRegionId, unitId, 1);
+        _request.Ping(_testRegionId, unitId, 1);
 
         var completedTask = await Task.WhenAny(requireTcs.Task, Task.Delay(3000));
         Assert.True(completedTask == requireTcs.Task, "Server không xóa ngầm Unit sau 10s.");
@@ -221,7 +221,7 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 500;
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, largeData);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, largeData);
 
         var completedTask = await Task.WhenAny(tcs.Task, Task.Delay(3000));
         Assert.True(completedTask == tcs.Task, "Gửi file >50KB thất bại hoặc mất data.");
@@ -239,7 +239,7 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 500;
-        await _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         Assert.True(await Task.WhenAny(tcs.Task, Task.Delay(2000)) == tcs.Task, "Lỗi khi xử lý Data rỗng.");
     }
@@ -265,8 +265,8 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1000;
-        await _request.Send(regionA, unitId, 1, targetTimeMs, "DATA_A"u8.ToArray());
-        await _request.Send(regionB, unitId, 1, targetTimeMs, "DATA_B"u8.ToArray());
+        _request.Send(regionA, unitId, 1, targetTimeMs, "DATA_A"u8.ToArray());
+        _request.Send(regionB, unitId, 1, targetTimeMs, "DATA_B"u8.ToArray());
 
         await Task.WhenAll(
             Task.WhenAny(tcsA.Task, Task.Delay(3000)),
@@ -288,15 +288,13 @@ public class UnitTest2 : IAsyncLifetime
         });
 
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000;
-        var spamTasks = new List<Task>();
 
         // Bắn song song 20 request Update vào cùng 1 UnitId
         for (int i = 0; i < 20; i++)
         {
-            spamTasks.Add(_request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty));
+            _request.Send(_testRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
         }
-
-        await Task.WhenAll(spamTasks);
+        
 
         // Chờ qua target time một chút
         await Task.Delay(3500);
@@ -320,7 +318,7 @@ public class UnitTest2 : IAsyncLifetime
         {
             for (long i = 1; i <= totalRequests; i++)
             {
-                await _request.Send(_testRegionId, i, 1, targetTimeMs, dummyData);
+                _request.Send(_testRegionId, i, 1, targetTimeMs, dummyData);
             }
         });
 
@@ -358,7 +356,7 @@ public class UnitTest2 : IAsyncLifetime
             for (long i = 1; i <= totalRequests; i++)
             {
                 // Fire and forget để ép Channel hoạt động hết công suất
-                _ = _request.Send(_testRegionId, i, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+                _request.Send(_testRegionId, i, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
             }
         });
 
@@ -396,7 +394,7 @@ public class UnitTest2 : IAsyncLifetime
             long regionId = 10000 + regionIndex;
             for (long i = 1; i <= itemsPerRegion; i++)
             {
-                _ = _request.Send(regionId, i, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+                _request.Send(regionId, i, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
             }
         });
 
@@ -431,7 +429,7 @@ public class UnitTest2 : IAsyncLifetime
             var timeBytes = BitConverter.GetBytes(now);
             
             // Gửi đi ngay lập tức (TimeTargetMs = now - 1000)
-            await _request.Send(_testRegionId, i, 1, now - 1000, timeBytes);
+            _request.Send(_testRegionId, i, 1, now - 1000, timeBytes);
             
             // Đợi 2ms giữa mỗi request để mô phỏng real-world traffic
             await Task.Delay(2); 
@@ -466,7 +464,7 @@ public class UnitTest2 : IAsyncLifetime
         {
             for (long i = 1; i <= totalPings; i++)
             {
-                _ = _request.Ping(_testRegionId, i, 1);
+               _request.Ping(_testRegionId, i, 1);
             }
         });
 

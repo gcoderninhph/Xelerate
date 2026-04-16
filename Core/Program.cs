@@ -81,7 +81,7 @@ async Task RunCase1_NormalFlow()
     doneSignals[unitId] = tcs;
 
     long targetTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000;
-    await request.Send(TestRegionId, unitId, 1, targetTime, Encoding.UTF8.GetBytes("Normal Case"));
+    request.Send(TestRegionId, unitId, 1, targetTime, Encoding.UTF8.GetBytes("Normal Case"));
 
     await WaitTask(tcs.Task, 4000, "Case 1");
 }
@@ -98,7 +98,7 @@ async Task RunCase2_RequireRecovery()
     doneSignals[unitId] = doneTcs;
 
     // Gửi Ping (Server không có thông tin sẽ kích hoạt Require)
-    await request.Ping(TestRegionId, unitId, 1);
+    request.Ping(TestRegionId, unitId, 1);
 
     await WaitTask(requireTcs.Task, 3000, "Case 2 (Đợi Require)");
     await WaitTask(doneTcs.Task, 3000, "Case 2 (Đợi Done)");
@@ -116,11 +116,11 @@ async Task RunCase3_VersionConflict()
     doneSignals[unitId] = doneTcs;
 
     long targetTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000;
-    await request.Send(TestRegionId, unitId, 1, targetTime, Encoding.UTF8.GetBytes("Version 1"));
+    request.Send(TestRegionId, unitId, 1, targetTime, Encoding.UTF8.GetBytes("Version 1"));
 
     // Đợi 1 chút rồi Ping với Version 2 (Cố tình làm sai lệch)
     await Task.Delay(500);
-    await request.Ping(TestRegionId, unitId, 2); 
+    request.Ping(TestRegionId, unitId, 2); 
 
     await WaitTask(requireTcs.Task, 3000, "Case 3 (Đợi NeedUpdate)");
     await WaitTask(doneTcs.Task, 4000, "Case 3 (Đợi Done)");
@@ -135,11 +135,11 @@ async Task RunCase4_Cancellation()
     cancelSignals[unitId] = true; // Đánh dấu để check trong OnDone
 
     long targetTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 3000;
-    await request.Send(TestRegionId, unitId, 1, targetTime, Encoding.UTF8.GetBytes("To be cancelled"));
+    request.Send(TestRegionId, unitId, 1, targetTime, Encoding.UTF8.GetBytes("To be cancelled"));
 
     await Task.Delay(1000);
     Console.WriteLine("   [Hành động] Đang gửi lệnh Cancel...");
-    await request.Cancel(TestRegionId, unitId, 1);
+    request.Cancel(TestRegionId, unitId, 1);
 
     // Đợi quá thời gian Target Time xem Done có bị gọi không
     await Task.Delay(3500);
@@ -159,7 +159,7 @@ async Task RunCase5_StressTest_Batching()
     
     for (long i = 10000; i < 10000 + totalRequests; i++)
     {
-        _ = request.Send(TestRegionId, i, 1, targetTime, dummyData);
+        request.Send(TestRegionId, i, 1, targetTime, dummyData);
     }
 
     Console.WriteLine("   [Đợi] Chờ Server trả về 5,000 Done signals...");

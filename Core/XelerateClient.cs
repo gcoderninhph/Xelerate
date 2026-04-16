@@ -24,9 +24,9 @@ public interface IXelerateClient
 
 public interface IXelerateRequest
 {
-    public Task Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data);
-    Task Ping(long regionId, long unitId, int version);
-    Task Cancel(long regionId, long unitId, int version);
+    void Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data);
+    void Ping(long regionId, long unitId, int version);
+    void Cancel(long regionId, long unitId, int version);
 }
 
 public class XelerateClient : IXelerateClient, IAsyncDisposable
@@ -233,7 +233,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
                             {
                                 // Lấy dữ liệu từ Callback và tự động gửi Update lại cho Server
                                 var req = Create(unitType);
-                                await req.Send(regionId, resultData.Value.UnitId, resultData.Value.Version,
+                                req.Send(regionId, resultData.Value.UnitId, resultData.Value.Version,
                                     resultData.Value.TimeTargetMs, resultData.Value.Data);
                             }
                         }
@@ -299,24 +299,21 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
 public class XelerateRequest(string unitType, Action<SendQueueItem> enqueueAction)
     : IXelerateRequest
 {
-    public Task Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data)
+    public void Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data)
     {
         var byteData = data.Length > 0 ? ByteString.CopyFrom(data.Span) : ByteString.Empty;
         enqueueAction(
             new SendQueueItem(regionId, unitType, unitId, version, timeTargetMs, byteData, ProcessType.Update));
-        return Task.CompletedTask;
     }
 
-    public Task Ping(long regionId, long unitId, int version)
+    public void Ping(long regionId, long unitId, int version)
     {
         enqueueAction(new SendQueueItem(regionId, unitType, unitId, version, 0, ByteString.Empty, ProcessType.Ping));
-        return Task.CompletedTask;
     }
 
-    public Task Cancel(long regionId, long unitId, int version)
+    public void Cancel(long regionId, long unitId, int version)
     {
         enqueueAction(new SendQueueItem(regionId, unitType, unitId, version, 0, ByteString.Empty, ProcessType.Delete));
-        return Task.CompletedTask;
     }
 }
 

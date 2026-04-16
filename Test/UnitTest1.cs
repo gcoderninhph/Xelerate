@@ -53,7 +53,7 @@ public class ProcessSystemTests : IAsyncLifetime
 
         // Act
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1000; // 1 giây
-        await _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         // Assert
         var delayTask = Task.Delay(3000); // Timeout 3 giây
@@ -87,7 +87,7 @@ public class ProcessSystemTests : IAsyncLifetime
         });
 
         // Act: Chỉ gửi Ping, không có data tồn tại trên Server -> Server phải đòi (Require)
-        await _request.Ping(TestRegionId, unitId, 1);
+        _request.Ping(TestRegionId, unitId, 1);
 
         // Assert
         var delayTask = Task.Delay(3000);
@@ -113,11 +113,11 @@ public class ProcessSystemTests : IAsyncLifetime
 
         // Act
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000; // Đích đến là 2 giây
-        await _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         // Chờ nửa giây rồi hủy
         await Task.Delay(500);
-        await _request.Cancel(TestRegionId, unitId, 1);
+        _request.Cancel(TestRegionId, unitId, 1);
 
         // Chờ vượt qua targetTimeMs xem Done có nổ không
         await Task.Delay(2500);
@@ -147,12 +147,12 @@ public class ProcessSystemTests : IAsyncLifetime
 
         // Act: Gửi Update Version 1
         long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000;
-        await _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
 
         await Task.Delay(200);
 
         // Gửi Ping lệch Version 2
-        await _request.Ping(TestRegionId, unitId, 2);
+        _request.Ping(TestRegionId, unitId, 2);
 
         // Assert
         var delayTask = Task.Delay(3000);
