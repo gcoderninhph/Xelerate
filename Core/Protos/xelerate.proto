@@ -7,18 +7,13 @@ message ProcessPayload {
   repeated ProcessType type = 2;
   repeated int64 unit_ids = 3;
   repeated int64 time_target_ms = 4;
-  repeated int32 versions = 5;
-  repeated bool statuses = 6;
-  repeated bytes data_list = 7;
-  string unit_type = 8;
+  repeated bytes data_list = 6;
+  string unit_type = 7;
 }
 
 enum ProcessType {
   UPDATE = 0;
   DELETE = 1;
-  PING = 2;
-  DONE = 3;
-  REQUIRE = 4;
-  NEED_UPDATE = 5;
+  DONE = 2;
 }
 

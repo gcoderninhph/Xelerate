@@ -1,5 +1,4 @@
-﻿using System.Buffers;
-using Google.Protobuf;
+﻿using Google.Protobuf;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
 using Confluent.Kafka;
@@ -12,10 +11,6 @@ public interface IXelerateClient
 {
     void StartAsync();
     Task EnsureTopicsExistAsync();
-    void OnRequire(string unitType, Func<XelerateResponse, Task<XelerateData>> onRequire);
-
-    // SỬA ĐỔI: Đổi Action thành Func để có thể trả về ProcessData cho Server
-    void OnRequire(string unitType, Func<XelerateResponse, XelerateData> onRequire);
 
     void OnDone(string unitType, Func<XelerateResponse, Task> onDone);
     void OnDone(string unitType, Action<XelerateResponse> onDone);
@@ -26,7 +21,6 @@ public interface IXelerateClient
 public interface IXelerateRequest
 {
     void Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data);
-    void Ping(long regionId, long unitId, int version);
     void Cancel(long regionId, long unitId, int version);
 }
 
@@ -67,7 +61,8 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
             BootstrapServers = kafkaBootstrapServers,
             // Nếu không có group, tạo random để hoạt động như Broadcast (giống NATS khi queueGroup = null)
             GroupId = string.IsNullOrEmpty(group) ? $"xelerate-client-{Guid.NewGuid()}" : group,
-            AutoOffsetReset = AutoOffsetReset.Latest
+            AutoOffsetReset = AutoOffsetReset.Earliest,
+            Acks = Acks.All
         };
 
         _consumer = new ConsumerBuilder<string, PooledMessage>(consumerConfig)
@@ -77,7 +72,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         _consumer.Subscribe("XelerateClientTopic");
 
         // 2. Cấu hình Kafka Producer (Zero-Allocation Native)
-        var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers };
+        var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers, Acks = Acks.All };
         _producer = new ProducerBuilder<string, byte[]>(producerConfig).Build();
     }
 
@@ -193,9 +188,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         }
 
         payload.UnitIds.Add(item.UnitId);
-        payload.Versions.Add(item.Version);
         payload.Type.Add(item.Type);
-        payload.Statuses.Add(false);
         payload.TimeTargetMs.Add(item.TimeTargetMs);
         payload.DataList.Add(item.Data);
 
@@ -259,28 +252,11 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
                 {
                     var type = payload.Type[i];
                     var unitId = payload.UnitIds[i];
-                    var version = payload.Versions[i];
                     var data = payload.DataList[i]?.Memory ?? ReadOnlyMemory<byte>.Empty;
 
-                    var response = new XelerateResponse(regionId, unitId, version, data);
-
-                    // Xử lý khi Server Require (mất context) hoặc NeedUpdate (sai version)
-                    if (type == ProcessType.Require || type == ProcessType.NeedUpdate)
-                    {
-                        if (_requireHandlersAsync.TryGetValue(unitType, out var handler))
-                        {
-                            var resultData = await handler(response);
-                            if (resultData.HasValue)
-                            {
-                                // Lấy dữ liệu từ Callback và tự động gửi Update lại cho Server
-                                var req = Create(unitType);
-                                req.Send(regionId, resultData.Value.UnitId, resultData.Value.Version,
-                                    resultData.Value.TimeTargetMs, resultData.Value.Data);
-                            }
-                        }
-                    }
-                    // Xử lý khi quá trình được Done tại Server
-                    else if (type == ProcessType.Done)
+                    var response = new XelerateResponse(regionId, unitId,  data);
+                    
+                    if (type == ProcessType.Done)
                     {
                         if (_doneHandlersAsync.TryGetValue(unitType, out var handler))
                         {
@@ -298,16 +274,6 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         {
             _payloadPool.Return(payload);
         }
-    }
-
-    public void OnRequire(string unitType, Func<XelerateResponse, Task<XelerateData>> onRequire)
-    {
-        _requireHandlersAsync[unitType] = async res => await onRequire(res);
-    }
-
-    public void OnRequire(string unitType, Func<XelerateResponse, XelerateData> onRequire)
-    {
-        _requireHandlersAsync[unitType] = res => Task.FromResult<XelerateData?>(onRequire(res));
     }
 
     public void OnDone(string unitType, Func<XelerateResponse, Task> onDone)
@@ -371,22 +337,16 @@ public class XelerateRequest(string unitType, Action<SendQueueItem> enqueueActio
             new SendQueueItem(regionId, unitType, unitId, version, timeTargetMs, byteData, ProcessType.Update));
     }
 
-    public void Ping(long regionId, long unitId, int version)
-    {
-        enqueueAction(new SendQueueItem(regionId, unitType, unitId, version, 0, ByteString.Empty, ProcessType.Ping));
-    }
-
     public void Cancel(long regionId, long unitId, int version)
     {
         enqueueAction(new SendQueueItem(regionId, unitType, unitId, version, 0, ByteString.Empty, ProcessType.Delete));
     }
 }
 
-public readonly struct XelerateResponse(long regionId, long unitId, int version, ReadOnlyMemory<byte> data)
+public readonly struct XelerateResponse(long regionId, long unitId,  ReadOnlyMemory<byte> data)
 {
     public long RegionId { get; } = regionId;
     public long UnitId { get; } = unitId;
-    public int Version { get; } = version;
     public ReadOnlyMemory<byte> Data { get; } = data;
 }
 

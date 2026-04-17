@@ -19,10 +19,8 @@ public class XelerateItemPooledObjectPolicy : PooledObjectPolicy<XelerateItem>
         }
         obj.DataLength = 0;
         obj.UnitType = string.Empty;
-        obj.Version = 0;
         obj.UnitId = 0;
         obj.TimeTargetMs = 0;
-        obj.Status = false;
 
         return true;
     }

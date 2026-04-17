@@ -11,15 +11,12 @@ public class Region : IAsyncDisposable
 {
     private readonly long _id;
 
-    // private NatsConnection _nats;
     private IProducer<string, byte[]> _producer;
 
     private Task? _loopTask;
     private CancellationTokenSource? _cts;
 
     Dictionary<string, TimedSortedSet<long, XelerateItem>> _processRunning = new();
-    Dictionary<string, TimedSortedSet<long, XelerateItem>> _deleteDelay = new();
-    Dictionary<string, TimedSortedSet<long, XelerateItem>> _pingExpired = new();
     Dictionary<string, Dictionary<long, XelerateItem>> _currentItems = new();
 
     private ObjectPool<ProcessPayload> _payloadPool;
@@ -31,11 +28,13 @@ public class Region : IAsyncDisposable
     private Dictionary<string, ProcessPayload> _currentPublishingPayload = new();
 
     private readonly Channel<RegionMessage> _channel;
+    private readonly ChannelWriter<DbOperation> _dbWriter;
 
-    public Region(long id, IProducer<string, byte[]> producer)
+    public Region(long id, IProducer<string, byte[]> producer, ChannelWriter<DbOperation> dbWriter)
     {
         _id = id;
         _producer = producer;
+        _dbWriter = dbWriter;
         // _nats = nats;
 
         var option = new UnboundedChannelOptions { SingleReader = true };
@@ -68,6 +67,48 @@ public class Region : IAsyncDisposable
         _channel.Writer.TryWrite(new RegionMessage(payload));
     }
 
+    // THÊM HÀM NÀY: Dùng để nạp dữ liệu từ MySQL lúc khởi động Server
+    public void RestoreItem(string unitType, long unitId, long timeTargetMs, byte[]? originalData)
+    {
+        var currentItem = _itemPool.Get();
+        currentItem.UnitId = unitId;
+        currentItem.UnitType = unitType;
+        currentItem.TimeTargetMs = timeTargetMs;
+
+        if (originalData != null && originalData.Length > 0)
+        {
+            var buffer = ArrayPool<byte>.Shared.Rent(originalData.Length);
+            originalData.CopyTo(buffer, 0);
+            currentItem.OriginalData = buffer;
+            currentItem.DataLength = originalData.Length;
+        }
+
+        var currentItems = GetCurrentItemsDict(unitType);
+        currentItems[unitId] = currentItem;
+
+        var sortedSet = GetProcessSorted(unitType);
+        var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+        if (timeTargetMs < now)
+        {
+            Done(currentItem); // Hết hạn rồi thì bắn Done luôn
+        }
+        else
+        {
+            sortedSet.AddOrUpdate(unitId, currentItem, timeTargetMs);
+        }
+    }
+
+    private Dictionary<long, XelerateItem> GetCurrentItemsDict(string unitType)
+    {
+        if (!_currentItems.TryGetValue(unitType, out var currentItems))
+        {
+            currentItems = new Dictionary<long, XelerateItem>();
+            _currentItems[unitType] = currentItems;
+        }
+
+        return currentItems;
+    }
 
     private async Task RegionLoopAsync(CancellationToken ct)
     {
@@ -98,9 +139,6 @@ public class Region : IAsyncDisposable
                             break;
                         case RegionMessageType.DoneItem:
                             Done(msg.Item!);
-                            break;
-                        case RegionMessageType.DeleteItem:
-                            Delete(msg.Item!);
                             break;
                     }
                 }
@@ -142,9 +180,6 @@ public class Region : IAsyncDisposable
 
                     switch (type)
                     {
-                        case ProcessType.Ping:
-                            Ping(item, i);
-                            break;
                         case ProcessType.Update:
                             Update(item, i);
                             break;
@@ -175,7 +210,7 @@ public class Region : IAsyncDisposable
             try
             {
                 payload.RegionId = _id;
-                
+
 
                 var message = new Message<string, byte[]>
                 {
@@ -192,61 +227,6 @@ public class Region : IAsyncDisposable
             {
                 _payloadPool.Return(payload);
             }
-        }
-    }
-
-    // đảm bảo phải ping để unit sống
-    // nếu không ping trong vòng 10 giây đối tượng sẽ tự xóa mà không có thông báo gì hết
-    // trường hợp đối tượng ping không có báo Require
-    private void Ping(ProcessPayload item, int i)
-    {
-        var unitId = item.UnitIds[i];
-        var version = item.Versions[i];
-        var unitType = item.UnitType;
-        if (_currentItems.TryGetValue(unitType, out var currentItems) &&
-            currentItems.TryGetValue(unitId, out var currentItem))
-        {
-            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            if (!_pingExpired.TryGetValue(unitType, out var pingSorted))
-            {
-                pingSorted = new TimedSortedSet<long, XelerateItem>();
-                _pingExpired[unitType] = pingSorted;
-                pingSorted.OnExpired += list =>
-                {
-                    // luồng ngoài -> đẩy chanel
-                    foreach (var valueTuple in list)
-                    {
-                        _channel.Writer.TryWrite(new RegionMessage(RegionMessageType.DeleteItem, valueTuple.Value));
-                    }
-                };
-            }
-
-            // thêm vào hàng chờ xóa nếu ping không được ping lại trong 10 giây
-            pingSorted.AddOrUpdate(unitId, currentItem, now + 10_000);
-
-            // case 1 dữ liệu hiện tại tại server đã hoàn thành nhưng client ping lên version cũ hơn,
-            // có thể do client bị lag hoặc gửi nhầm, không cần gửi lại Require,
-            // Gửi lại OnDone để client cập nhật lại
-            if (version < currentItem.Version && currentItem.Status)
-            {
-                currentItem.Type = ProcessType.Done;
-                SendToClient(currentItem);
-            }
-            // case 2 dữ liệu version bị khác nhau nhưng không phải case 1, yêu cầu client gửi lại update
-            else if (version != currentItem.Version)
-            {
-                var newItem = GetByIndex(item, i);
-                newItem.Type = ProcessType.NeedUpdate;
-                SendToClient(newItem);
-                _itemPool.Return(newItem);
-            }
-        }
-        else
-        {
-            var newItem = GetByIndex(item, i);
-            newItem.Type = ProcessType.Require;
-            SendToClient(newItem);
-            _itemPool.Return(newItem);
         }
     }
 
@@ -292,8 +272,29 @@ public class Region : IAsyncDisposable
             }
 
             var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-            var pingSorted = GetPingSorted(unitType);
-            pingSorted.AddOrUpdate(unitId, currentItem, now + 10_000);
+
+
+            // 👇 THÊM CODE DB VÀO ĐÂY (Sự kiện 1 và 2: Upsert)
+            byte[]? clonedData = null;
+            if (currentItem.DataLength > 0 && currentItem.OriginalData != null)
+            {
+                // Clone array để luồng DB xử lý không bị đụng chạm với ArrayPool
+                clonedData = new byte[currentItem.DataLength];
+                Array.Copy(currentItem.OriginalData, clonedData, currentItem.DataLength);
+            }
+
+            _dbWriter.TryWrite(new DbOperation
+            {
+                OpType = DbOpType.Upsert,
+                RegionId = _id,
+                UnitType = unitType,
+                UnitId = unitId,
+                TimeTargetMs = currentItem.TimeTargetMs,
+                Data = clonedData
+            });
+            // 👆 KẾT THÚC THÊM CODE DB
+
+
             if (currentItem.TimeTargetMs < now)
             {
                 Done(currentItem);
@@ -310,19 +311,26 @@ public class Region : IAsyncDisposable
 // Client yêu cầu xóa, đây là force delete
     private void Delete(ProcessPayload item, int i)
     {
-        var deleteSorted = GetDeleteSorted(item.UnitType);
         var processSorted = GetProcessSorted(item.UnitType); // Thêm
-        var pingSorted = GetPingSorted(item.UnitType);
 
         if (_currentItems.TryGetValue(item.UnitType, out var currentItems))
         {
             var unitId = item.UnitIds[i];
 
+            // 👇 THÊM CODE DB VÀO ĐÂY (Sự kiện 3: Xóa theo yêu cầu)
+            _dbWriter.TryWrite(new DbOperation
+            {
+                OpType = DbOpType.Delete,
+                RegionId = _id,
+                UnitType = item.UnitType,
+                UnitId = unitId
+            });
+            // 👆 KẾT THÚC THÊM CODE DB
+
+
             if (currentItems.TryGetValue(unitId, out var currentItem))
             {
-                deleteSorted.Remove(unitId);
                 processSorted.Remove(unitId);
-                pingSorted.Remove(unitId);
 
                 currentItems.Remove(unitId);
                 _itemPool.Return(currentItem);
@@ -330,16 +338,27 @@ public class Region : IAsyncDisposable
         }
     }
 
-// luông an toàn
-    private void Delete(XelerateItem item)
+    // khi là Done, chuyển tất cả status = true, gửi về client OnDone
+    // tăng version lên 1
+    // lên lịch xóa khỏi _currentItems sau 10 giây
+    // luồng an toàn
+    private void Done(XelerateItem item)
     {
-        var deleteSorted = GetDeleteSorted(item.UnitType);
-        var processSorted = GetProcessSorted(item.UnitType);
-        var pingSorted = GetPingSorted(item.UnitType);
-
-        deleteSorted.Remove(item.UnitId);
+        item.Type = ProcessType.Done;
+        var unitType = item.UnitType;
+        var processSorted = GetProcessSorted(unitType);
         processSorted.Remove(item.UnitId);
-        pingSorted.Remove(item.UnitId);
+        SendToClient(item);
+        
+        // 👇 THÊM CODE DB VÀO ĐÂY (Sự kiện 3: Xóa khi Timeout Done)
+        _dbWriter.TryWrite(new DbOperation
+        {
+            OpType = DbOpType.Delete,
+            RegionId = _id,
+            UnitType = unitType,
+            UnitId = item.UnitId
+        });
+        // 👆 KẾT THÚC THÊM CODE DB
 
         if (_currentItems.TryGetValue(item.UnitType, out var currentItems))
         {
@@ -349,46 +368,22 @@ public class Region : IAsyncDisposable
         _itemPool.Return(item);
     }
 
-
-    // khi là Done, chuyển tất cả status = true, gửi về client OnDone
-    // tăng version lên 1
-    // lên lịch xóa khỏi _currentItems sau 10 giây
-    // luồng an toàn
-    private void Done(XelerateItem item)
-    {
-        item.Status = true;
-        item.Type = ProcessType.Done;
-        item.Version++;
-        var unitType = item.UnitType;
-        var deleteSorted = GetDeleteSorted(unitType);
-        var processSorted = GetProcessSorted(unitType);
-        deleteSorted.AddOrUpdate(item.UnitId, item, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 10_000);
-        processSorted.Remove(item.UnitId);
-        SendToClient(item);
-    }
-
     private static bool ValidData(ProcessPayload item)
     {
-        return item.UnitIds.Count == item.Statuses.Count &&
-               item.UnitIds.Count == item.TimeTargetMs.Count &&
-               item.UnitIds.Count == item.DataList.Count &&
-               item.UnitIds.Count == item.Versions.Count;
+        return item.UnitIds.Count == item.TimeTargetMs.Count &&
+               item.UnitIds.Count == item.DataList.Count;
     }
 
     private XelerateItem GetByIndex(ProcessPayload item, int i)
     {
         var unitId = item.UnitIds[i];
-        var status = item.Statuses[i];
         var timeTargetM = item.TimeTargetMs[i];
         var data = item.DataList[i];
-        var version = item.Versions[i];
 
         var result = _itemPool.Get();
         result.UnitId = unitId;
-        result.Status = status;
         result.TimeTargetMs = timeTargetM;
         result.UnitType = item.UnitType;
-        result.Version = version;
 
         if (data != null && data.Length > 0)
         {
@@ -404,7 +399,6 @@ public class Region : IAsyncDisposable
     private void SetValueByIndex(ProcessPayload item, int i, XelerateItem value)
     {
         value.UnitId = item.UnitIds[i];
-        value.Status = item.Statuses[i];
         value.TimeTargetMs = item.TimeTargetMs[i];
         value.UnitType = item.UnitType;
 
@@ -431,25 +425,6 @@ public class Region : IAsyncDisposable
         }
     }
 
-    private TimedSortedSet<long, XelerateItem> GetDeleteSorted(string unitType)
-    {
-        if (!_deleteDelay.TryGetValue(unitType, out var sorted))
-        {
-            sorted = new TimedSortedSet<long, XelerateItem>();
-            _deleteDelay[unitType] = sorted;
-            sorted.OnExpired += list =>
-            {
-                // luồng ngoai -> đẩy chanel
-                foreach (var valueTuple in list)
-                {
-                    _channel.Writer.TryWrite(new RegionMessage(RegionMessageType.DeleteItem, valueTuple.Value));
-                }
-            };
-        }
-
-        return sorted;
-    }
-
     private TimedSortedSet<long, XelerateItem> GetProcessSorted(string unitType)
     {
         if (!_processRunning.TryGetValue(unitType, out var sorted))
@@ -462,25 +437,6 @@ public class Region : IAsyncDisposable
                 foreach (var valueTuple in list)
                 {
                     _channel.Writer.TryWrite(new RegionMessage(RegionMessageType.DoneItem, valueTuple.Value));
-                }
-            };
-        }
-
-        return sorted;
-    }
-
-    private TimedSortedSet<long, XelerateItem> GetPingSorted(string unitType)
-    {
-        if (!_pingExpired.TryGetValue(unitType, out var sorted))
-        {
-            sorted = new TimedSortedSet<long, XelerateItem>();
-            _pingExpired[unitType] = sorted;
-            sorted.OnExpired += list =>
-            {
-                // luồng ngoai -> đẩy chanel
-                foreach (var valueTuple in list)
-                {
-                    _channel.Writer.TryWrite(new RegionMessage(RegionMessageType.DeleteItem, valueTuple.Value));
                 }
             };
         }

@@ -1,5 +1,6 @@
 ﻿using Confluent.Kafka;
 using Confluent.Kafka.Admin;
+using MySqlConnector;
 using Xelerate;
 using Xunit;
 using Assert = Xunit.Assert;
@@ -10,158 +11,198 @@ namespace ProcessSystem.Tests;
 public class ProcessSystemTests : IAsyncLifetime
 {
     private const string KafkaUrl = "localhost:29092";
-    private const string TestUnitType = "TestHero";
-    private const long TestRegionId = 9999;
+    private const string MysqlUrl = "Server=localhost;Port=3306;Database=xelerate;User Id=root;Password=12345678;";
 
     private XelerateServer _server = null!;
     private XelerateClient _client = null!;
-    private IXelerateRequest _request = null!;
 
-    // Chạy TRƯỚC mỗi bài Test
     public async Task InitializeAsync()
     {
-        // 1. Khởi động Server
-        _server = new XelerateServer(KafkaUrl);
-        await _server.EnsureTopicsExistAsync();
-        _server.StartAsync();
+        // 1. Dọn dẹp Database trước khi chạy test để tránh xung đột dữ liệu cũ
+        await CleanupDatabaseAsync();
 
-        // 2. Khởi động Client
-        _client = new XelerateClient(KafkaUrl);
+        // 2. Khởi tạo Server (Bây giờ dùng await an toàn vì StartAsync đã dùng Task.Run bên trong)
+        _server = new XelerateServer(KafkaUrl, MysqlUrl);
+        await _server.EnsureTopicsExistAsync();
+        await _server.StartAsync();
+
+        // 3. Khởi tạo Client
+        // Mỗi test run tạo một GroupId ngẫu nhiên để ép Kafka đọc từ đầu, không dính state cũ
+        string uniqueGroupId = $"test-client-group-{Guid.NewGuid()}";
+        _client = new XelerateClient(KafkaUrl, uniqueGroupId);
+        await _client.EnsureTopicsExistAsync();
         _client.StartAsync();
 
-        _request = _client.Create(TestUnitType);
+        // 4. CHỜ KAFKA REBALANCE: Cực kỳ quan trọng (Tối thiểu 5-7 giây)
+        // Kafka cần vài giây để gán Partition cho Consumer mới. 
+        // Nếu bắn lệnh Send ngay lúc này, dữ liệu sẽ vào Topic nhưng Client chưa kịp nghe.
+        Console.WriteLine("Waiting 6 seconds for Kafka Consumer Rebalance...");
+        await Task.Delay(6000);
     }
 
-    // Chạy SAU mỗi bài Test (Dọn dẹp)
     public async Task DisposeAsync()
     {
         if (_client != null) await _client.DisposeAsync();
         if (_server != null) await _server.DisposeAsync();
     }
 
+    private async Task CleanupDatabaseAsync()
+    {
+        try
+        {
+            await using var conn = new MySqlConnection(MysqlUrl);
+            await conn.OpenAsync();
+            await using var cmd = conn.CreateCommand();
+            // Xóa toàn bộ bảng để khởi tạo lại sạch sẽ khi Server.StartAsync chạy
+            cmd.CommandText = "DROP TABLE IF EXISTS `XelerateItems`;";
+            await cmd.ExecuteNonQueryAsync();
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"Không thể dọn dẹp DB (Có thể DB chưa bật): {ex.Message}");
+        }
+    }
+
     [Fact]
-    public async Task SendUpdate_WaitUntilTargetTime_ShouldTriggerOnDone()
+    public async Task TC_E2E_01_HappyPath_ShouldTriggerOnDone()
     {
         // Arrange
-        long unitId = 1;
+        var unitType = "TestBuff_HappyPath";
+        long regionId = 1;
+        long unitId = 99;
+        int version = 1;
+        byte[] payloadData = { 1, 2, 3 };
+
+        // Target: 2 giây trong tương lai
+        long targetMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000;
+        var tcs = new TaskCompletionSource<XelerateResponse>();
+
+        _client.OnDone(unitType, response =>
+        {
+            if (response.UnitId == unitId)
+            {
+                tcs.TrySetResult(response);
+            }
+        });
+
+        // Act
+        var request = _client.Create(unitType);
+        request.Send(regionId, unitId, version, targetMs, payloadData);
+
+        // Assert
+        // Đặt timeout 15 giây để phòng ngừa độ trễ mạng Kafka
+        var result = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+        Assert.Equal(regionId, result.RegionId);
+        Assert.Equal(unitId, result.UnitId);
+        Assert.True(result.Data.Span.SequenceEqual(payloadData));
+    }
+
+    [Fact]
+    public async Task TC_E2E_02_CancelFlow_ShouldNeverTriggerOnDone()
+    {
+        // Arrange
+        var unitType = "TestBuff_Cancel";
+        long regionId = 2;
+        long unitId = 100;
+
+        // Target: 4 giây trong tương lai
+        long targetMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 4000;
+        bool onDoneCalled = false;
+
+        _client.OnDone(unitType, response =>
+        {
+            if (response.UnitId == unitId) onDoneCalled = true;
+        });
+
+        // Act
+        var request = _client.Create(unitType);
+        request.Send(regionId, unitId, 1, targetMs, Array.Empty<byte>());
+
+        // Đợi 1 giây rồi gửi lệnh Cancel
+        await Task.Delay(1000);
+        request.Cancel(regionId, unitId, 1);
+
+        // Assert
+        // Đợi thêm 4.5 giây (để chắc chắn đã vượt qua mốc TimeTargetMs)
+        await Task.Delay(4500);
+
+        Assert.False(onDoneCalled, "Lệnh Cancel bị lỗi: OnDone vẫn bị gọi!");
+    }
+
+    [Fact]
+    public async Task TC_E2E_03_UpdateOverride_ShouldTriggerAtNewTime()
+    {
+        // Arrange
+        var unitType = "TestBuff_Override";
+        long regionId = 3;
+        long unitId = 101;
+        var tcs = new TaskCompletionSource<long>();
+
+        _client.OnDone(unitType, response =>
+        {
+            if (response.UnitId == unitId)
+            {
+                tcs.TrySetResult(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            }
+        });
+
+        // Act
+        var request = _client.Create(unitType);
+
+        // Lần 1: Lên lịch 6 giây sau
+        long time1 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 6000;
+        request.Send(regionId, unitId, 1, time1, Array.Empty<byte>());
+
+        // Lần 2 (Ngay lập tức): Rút ngắn thời gian chỉ còn 2 giây sau
+        await Task.Delay(100);
+        long time2 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000;
+        request.Send(regionId, unitId, 2, time2, Array.Empty<byte>());
+
+        // Assert
+        // Phải nhận được kết quả trong tối đa 5 giây (vì đã update xuống 2 giây)
+        var actualTriggerTime = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Kiểm tra logic thời gian
+        Assert.True(actualTriggerTime >= time2, "Nổ quá sớm so với Target 2!");
+        Assert.True(actualTriggerTime < time1, "Nổ quá trễ, có vẻ lệnh Update thứ 2 không có tác dụng!");
+    }
+
+    [Fact]
+    public async Task TC_E2E_04_HighThroughput_BatchingCheck()
+    {
+        // Arrange
+        var unitType = "TestBuff_Batching";
+        long regionId = 4;
+        int totalItems = 1000; // Gửi 1000 items
+
+        int completedCount = 0;
         var tcs = new TaskCompletionSource<bool>();
 
-        _client.OnDone(TestUnitType, res =>
+        // Target: 2 giây trong tương lai cho toàn bộ 1000 items
+        long targetMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000;
+
+        _client.OnDone(unitType, response =>
         {
-            if (res.UnitId == unitId)
+            var count = Interlocked.Increment(ref completedCount);
+            if (count == totalItems)
             {
                 tcs.TrySetResult(true);
             }
         });
 
         // Act
-        long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1000; // 1 giây
-        _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
+        var request = _client.Create(unitType);
+        for (int i = 1; i <= totalItems; i++)
+        {
+            request.Send(regionId, i, 1, targetMs, new byte[] { 255 });
+        }
 
         // Assert
-        var delayTask = Task.Delay(3000); // Timeout 3 giây
-        var completedTask = await Task.WhenAny(tcs.Task, delayTask);
+        // Mở rộng thời gian chờ lên 15 giây vì 1000 items đi qua DB + Kafka sẽ mất chút thời gian
+        var success = await tcs.Task.WaitAsync(TimeSpan.FromSeconds(15));
 
-        Assert.True(completedTask == tcs.Task, "Sự kiện OnDone không được gọi trong thời gian mong đợi (Timeout).");
-    }
-
-    [Fact]
-    public async Task PingMissingUnit_ShouldTriggerOnRequire_AndThenComplete()
-    {
-        // Arrange
-        long unitId = 2;
-        var requireTcs = new TaskCompletionSource<bool>();
-        var doneTcs = new TaskCompletionSource<bool>();
-
-        // Lắng nghe Require
-        _client.OnRequire(TestUnitType, res =>
-        {
-            if (res.UnitId == unitId) requireTcs.TrySetResult(true);
-
-            // Tự động trả về dữ liệu phục hồi
-            long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 500;
-            return new XelerateData(res.UnitId, res.Version, targetTimeMs, ReadOnlyMemory<byte>.Empty);
-        });
-
-        // Lắng nghe Done
-        _client.OnDone(TestUnitType, res =>
-        {
-            if (res.UnitId == unitId) doneTcs.TrySetResult(true);
-        });
-
-        // Act: Chỉ gửi Ping, không có data tồn tại trên Server -> Server phải đòi (Require)
-        _request.Ping(TestRegionId, unitId, 1);
-
-        // Assert
-        var delayTask = Task.Delay(3000);
-
-        var requireCompleted = await Task.WhenAny(requireTcs.Task, delayTask);
-        Assert.True(requireCompleted == requireTcs.Task, "Không nhận được sự kiện OnRequire từ Server.");
-
-        var doneCompleted = await Task.WhenAny(doneTcs.Task, delayTask);
-        Assert.True(doneCompleted == doneTcs.Task, "Không nhận được sự kiện OnDone sau khi đã phục hồi dữ liệu.");
-    }
-
-    [Fact]
-    public async Task CancelProcessing_ShouldNeverTriggerOnDone()
-    {
-        // Arrange
-        long unitId = 3;
-        bool doneTriggered = false;
-
-        _client.OnDone(TestUnitType, res =>
-        {
-            if (res.UnitId == unitId) doneTriggered = true;
-        });
-
-        // Act
-        long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000; // Đích đến là 2 giây
-        _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
-
-        // Chờ nửa giây rồi hủy
-        await Task.Delay(500);
-        _request.Cancel(TestRegionId, unitId, 1);
-
-        // Chờ vượt qua targetTimeMs xem Done có nổ không
-        await Task.Delay(2500);
-
-        // Assert
-        Assert.False(doneTriggered, "Lỗi: Sự kiện OnDone vẫn bị gọi mặc dù đã gửi lệnh Cancel.");
-    }
-
-    [Fact]
-    public async Task VersionConflict_ShouldTriggerNeedUpdate()
-    {
-        // Arrange
-        long unitId = 4;
-        var needUpdateTcs = new TaskCompletionSource<bool>();
-
-        // NeedUpdate chạy chung luồng OnRequire
-        _client.OnRequire(TestUnitType, res =>
-        {
-            if (res.UnitId == unitId && res.Version == 2)
-            {
-                needUpdateTcs.TrySetResult(true);
-            }
-
-            return new XelerateData(res.UnitId, res.Version, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 1000,
-                ReadOnlyMemory<byte>.Empty);
-        });
-
-        // Act: Gửi Update Version 1
-        long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000;
-        _request.Send(TestRegionId, unitId, 1, targetTimeMs, ReadOnlyMemory<byte>.Empty);
-
-        await Task.Delay(200);
-
-        // Gửi Ping lệch Version 2
-        _request.Ping(TestRegionId, unitId, 2);
-
-        // Assert
-        var delayTask = Task.Delay(3000);
-        var completedTask = await Task.WhenAny(needUpdateTcs.Task, delayTask);
-
-        Assert.True(completedTask == needUpdateTcs.Task,
-            "Server không phát hiện ra lệch version để báo NeedUpdate (Require).");
+        Assert.True(success);
+        Assert.Equal(totalItems, completedCount);
     }
 }

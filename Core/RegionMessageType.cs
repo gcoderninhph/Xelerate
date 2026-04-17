@@ -3,6 +3,5 @@
 public enum RegionMessageType : byte
 {
     ProcessPayload,
-    DoneItem,
-    DeleteItem
+    DoneItem
 }
