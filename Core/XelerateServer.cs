@@ -32,8 +32,7 @@ public class XelerateServer : IAsyncDisposable
         {
             BootstrapServers = kafkaBootstrapServers,
             GroupId = "xelerate-server-group",
-            AutoOffsetReset = AutoOffsetReset.Earliest,
-            Acks = Acks.All
+            AutoOffsetReset = AutoOffsetReset.Earliest
         };
 
         // Gắn PooledBytesDeserializer vào Consumer

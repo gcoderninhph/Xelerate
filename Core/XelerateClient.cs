@@ -20,8 +20,8 @@ public interface IXelerateClient
 
 public interface IXelerateRequest
 {
-    void Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data);
-    void Cancel(long regionId, long unitId, int version);
+    void Send(long regionId, long unitId, long timeTargetMs, ReadOnlyMemory<byte> data);
+    void Cancel(long regionId, long unitId);
 }
 
 public class XelerateClient : IXelerateClient, IAsyncDisposable
@@ -30,13 +30,8 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
     private readonly IConsumer<string, PooledMessage> _consumer;
     private readonly IProducer<string, byte[]> _producer;
 
-
     private readonly CancellationTokenSource _cts = new();
-
-    // Lưu trữ các callback handlers dựa theo UnitType
-    private readonly ConcurrentDictionary<string, Func<XelerateResponse, Task<XelerateData?>>> _requireHandlersAsync =
-        new();
-
+    
     private readonly ConcurrentDictionary<string, Func<XelerateResponse, Task>> _doneHandlersAsync = new();
     private readonly ObjectPool<ProcessPayload> _payloadPool;
 
@@ -61,8 +56,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
             BootstrapServers = kafkaBootstrapServers,
             // Nếu không có group, tạo random để hoạt động như Broadcast (giống NATS khi queueGroup = null)
             GroupId = string.IsNullOrEmpty(group) ? $"xelerate-client-{Guid.NewGuid()}" : group,
-            AutoOffsetReset = AutoOffsetReset.Earliest,
-            Acks = Acks.All
+            AutoOffsetReset = AutoOffsetReset.Earliest
         };
 
         _consumer = new ConsumerBuilder<string, PooledMessage>(consumerConfig)
@@ -330,16 +324,16 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
 public class XelerateRequest(string unitType, Action<SendQueueItem> enqueueAction)
     : IXelerateRequest
 {
-    public void Send(long regionId, long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data)
+    public void Send(long regionId, long unitId, long timeTargetMs, ReadOnlyMemory<byte> data)
     {
         var byteData = data.Length > 0 ? ByteString.CopyFrom(data.Span) : ByteString.Empty;
         enqueueAction(
-            new SendQueueItem(regionId, unitType, unitId, version, timeTargetMs, byteData, ProcessType.Update));
+            new SendQueueItem(regionId, unitType, unitId, timeTargetMs, byteData, ProcessType.Update));
     }
 
-    public void Cancel(long regionId, long unitId, int version)
+    public void Cancel(long regionId, long unitId)
     {
-        enqueueAction(new SendQueueItem(regionId, unitType, unitId, version, 0, ByteString.Empty, ProcessType.Delete));
+        enqueueAction(new SendQueueItem(regionId, unitType, unitId, 0, ByteString.Empty, ProcessType.Delete));
     }
 }
 
@@ -350,19 +344,10 @@ public readonly struct XelerateResponse(long regionId, long unitId,  ReadOnlyMem
     public ReadOnlyMemory<byte> Data { get; } = data;
 }
 
-public readonly struct XelerateData(long unitId, int version, long timeTargetMs, ReadOnlyMemory<byte> data)
-{
-    public long UnitId { get; } = unitId;
-    public int Version { get; } = version;
-    public long TimeTargetMs { get; } = timeTargetMs;
-    public ReadOnlyMemory<byte> Data { get; } = data;
-}
-
 public readonly struct SendQueueItem(
     long regionId,
     string unitType,
     long unitId,
-    int version,
     long timeTargetMs,
     ByteString data,
     ProcessType type)
@@ -370,7 +355,6 @@ public readonly struct SendQueueItem(
     public long RegionId { get; } = regionId;
     public string UnitType { get; } = unitType;
     public long UnitId { get; } = unitId;
-    public int Version { get; } = version;
     public long TimeTargetMs { get; } = timeTargetMs;
     public ByteString Data { get; } = data;
     public ProcessType Type { get; } = type;

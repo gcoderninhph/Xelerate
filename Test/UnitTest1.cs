@@ -70,7 +70,6 @@ public class ProcessSystemTests : IAsyncLifetime
         var unitType = "TestBuff_HappyPath";
         long regionId = 1;
         long unitId = 99;
-        int version = 1;
         byte[] payloadData = { 1, 2, 3 };
 
         // Target: 2 giây trong tương lai
@@ -87,7 +86,7 @@ public class ProcessSystemTests : IAsyncLifetime
 
         // Act
         var request = _client.Create(unitType);
-        request.Send(regionId, unitId, version, targetMs, payloadData);
+        request.Send(regionId, unitId, targetMs, payloadData);
 
         // Assert
         // Đặt timeout 15 giây để phòng ngừa độ trễ mạng Kafka
@@ -117,11 +116,11 @@ public class ProcessSystemTests : IAsyncLifetime
 
         // Act
         var request = _client.Create(unitType);
-        request.Send(regionId, unitId, 1, targetMs, Array.Empty<byte>());
+        request.Send(regionId, unitId, targetMs, Array.Empty<byte>());
 
         // Đợi 1 giây rồi gửi lệnh Cancel
         await Task.Delay(1000);
-        request.Cancel(regionId, unitId, 1);
+        request.Cancel(regionId, unitId);
 
         // Assert
         // Đợi thêm 4.5 giây (để chắc chắn đã vượt qua mốc TimeTargetMs)
@@ -152,12 +151,12 @@ public class ProcessSystemTests : IAsyncLifetime
 
         // Lần 1: Lên lịch 6 giây sau
         long time1 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 6000;
-        request.Send(regionId, unitId, 1, time1, Array.Empty<byte>());
+        request.Send(regionId, unitId, time1, Array.Empty<byte>());
 
         // Lần 2 (Ngay lập tức): Rút ngắn thời gian chỉ còn 2 giây sau
         await Task.Delay(100);
         long time2 = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 2000;
-        request.Send(regionId, unitId, 2, time2, Array.Empty<byte>());
+        request.Send(regionId, unitId, time2, Array.Empty<byte>());
 
         // Assert
         // Phải nhận được kết quả trong tối đa 5 giây (vì đã update xuống 2 giây)
@@ -195,7 +194,7 @@ public class ProcessSystemTests : IAsyncLifetime
         var request = _client.Create(unitType);
         for (int i = 1; i <= totalItems; i++)
         {
-            request.Send(regionId, i, 1, targetMs, new byte[] { 255 });
+            request.Send(regionId, i, targetMs, new byte[] { 255 });
         }
 
         // Assert
