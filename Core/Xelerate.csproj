@@ -7,9 +7,11 @@
         <Nullable>enable</Nullable>
         <RootNamespace>ProcessServer</RootNamespace>
         <Version>1.0.2</Version>
+        <DockerDefaultTargetOS>Linux</DockerDefaultTargetOS>
     </PropertyGroup>
 
     <ItemGroup>
+        <PackageReference Include="Confluent.Kafka" Version="2.14.0" />
         <PackageReference Include="Google.Protobuf" Version="3.34.1" />
         <PackageReference Include="Grpc.Tools" Version="2.80.0">
             <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
@@ -22,6 +24,12 @@
     
     <ItemGroup>
         <Protobuf Include="Protos\*.proto" GrpcServices="None" />
+    </ItemGroup>
+    
+    <ItemGroup>
+      <Content Include="..\.dockerignore">
+        <Link>.dockerignore</Link>
+      </Content>
     </ItemGroup>
     
 

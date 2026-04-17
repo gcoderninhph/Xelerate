@@ -1,8 +1,8 @@
 ﻿using System.Buffers;
 using System.Threading.Channels;
+using Confluent.Kafka;
 using Microsoft.Extensions.ObjectPool;
 using Google.Protobuf;
-using NATS.Client.Core;
 using ProcessServer;
 
 namespace Xelerate;
@@ -10,7 +10,9 @@ namespace Xelerate;
 public class Region : IAsyncDisposable
 {
     private readonly long _id;
-    private NatsConnection _nats;
+
+    // private NatsConnection _nats;
+    private IProducer<string, byte[]> _producer;
 
     private Task? _loopTask;
     private CancellationTokenSource? _cts;
@@ -30,10 +32,11 @@ public class Region : IAsyncDisposable
 
     private readonly Channel<RegionMessage> _channel;
 
-    public Region(long id, NatsConnection nats)
+    public Region(long id, IProducer<string, byte[]> producer)
     {
         _id = id;
-        _nats = nats;
+        _producer = producer;
+        // _nats = nats;
 
         var option = new UnboundedChannelOptions { SingleReader = true };
         _channel = Channel.CreateUnbounded<RegionMessage>(option);
@@ -112,7 +115,7 @@ public class Region : IAsyncDisposable
                 }
             }
 
-            await FlushPendingPublishesAsync(ct);
+            FlushPendingPublishesAsync();
         }
     }
 
@@ -158,7 +161,7 @@ public class Region : IAsyncDisposable
         }
     }
 
-    private async Task FlushPendingPublishesAsync(CancellationToken ct)
+    private void FlushPendingPublishesAsync()
     {
         foreach (var payload in _currentPublishingPayload.Values)
         {
@@ -172,11 +175,18 @@ public class Region : IAsyncDisposable
             try
             {
                 payload.RegionId = _id;
-                var size = payload.CalculateSize();
-                var byteData = ArrayPool<byte>.Shared.Rent(size);
-                payload.WriteTo(byteData.AsSpan(0, size));
-                await _nats.PublishAsync("XelerateClientSubject", byteData.AsMemory(0, size),
-                    cancellationToken: ct);
+                
+
+                var message = new Message<string, byte[]>
+                {
+                    Key = $"Region.{_id}",
+                    Value = payload.ToByteArray()
+                };
+
+                _producer.Produce("XelerateClientTopic", message, deliveryReport =>
+                {
+                    if (deliveryReport.Error.IsError) Console.WriteLine(deliveryReport.Error.Reason);
+                });
             }
             finally
             {
@@ -502,7 +512,7 @@ public class Region : IAsyncDisposable
         // Bước 1: Gửi tín hiệu hủy (Cancel) để yêu cầu _loopTask dừng lại
         if (_cts != null && !_cts.IsCancellationRequested)
         {
-            await _cts.CancelAsync(); 
+            await _cts.CancelAsync();
         }
 
         // Bước 2: CHỜ cho Task thực sự kết thúc vòng lặp
@@ -535,7 +545,7 @@ public class Region : IAsyncDisposable
 
         // Dọn dẹp Channel và các tài nguyên khác
         _channel.Writer.TryComplete();
-    
+
         // ... (Giữ nguyên phần dọn dẹp Dictionary / Pool cũ của bạn nếu có)
     }
 }

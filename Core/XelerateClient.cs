@@ -1,8 +1,8 @@
 ﻿using System.Buffers;
 using Google.Protobuf;
-using NATS.Client.Core;
 using System.Collections.Concurrent;
 using System.Threading.Channels;
+using Confluent.Kafka;
 using Microsoft.Extensions.ObjectPool;
 using ProcessServer;
 
@@ -10,7 +10,7 @@ namespace Xelerate;
 
 public interface IXelerateClient
 {
-    Task StartAsync();
+    void StartAsync();
     void OnRequire(string unitType, Func<XelerateResponse, Task<XelerateData>> onRequire);
 
     // SỬA ĐỔI: Đổi Action thành Func để có thể trả về ProcessData cho Server
@@ -31,7 +31,11 @@ public interface IXelerateRequest
 
 public class XelerateClient : IXelerateClient, IAsyncDisposable
 {
-    private readonly NatsConnection _nats;
+    // private readonly NatsConnection _nats;
+    private readonly IConsumer<string, PooledMessage> _consumer;
+    private readonly IProducer<string, byte[]> _producer;
+
+
     private readonly CancellationTokenSource _cts = new();
 
     // Lưu trữ các callback handlers dựa theo UnitType
@@ -44,21 +48,37 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
     private readonly Channel<ProcessPayload> _receiveChannel = Channel.CreateUnbounded<ProcessPayload>();
     private readonly Channel<SendQueueItem> _sendChannel = Channel.CreateUnbounded<SendQueueItem>();
     const int MaxBatchSize = 50 * 1024; // 50KB
-    private string? _group;
+    // private string? _group;
 
 
-    public XelerateClient(string natsUrl, string? group = null)
+    public XelerateClient(string kafkaBootstrapServers, string? group = null)
     {
-        _nats = new NatsConnection(new NatsOpts { Url = natsUrl });
+        // _nats = new NatsConnection(new NatsOpts { Url = natsUrl });
         DefaultObjectPoolProvider provider = new();
         _payloadPool = provider.Create(new XeleratePayloadPooledObjectPolicy());
-        _group = group;
+        // _group = group;
+
+        // 1. Cấu hình Kafka Consumer
+        var consumerConfig = new ConsumerConfig
+        {
+            BootstrapServers = kafkaBootstrapServers,
+            // Nếu không có group, tạo random để hoạt động như Broadcast (giống NATS khi queueGroup = null)
+            GroupId = string.IsNullOrEmpty(group) ? $"xelerate-client-{Guid.NewGuid()}" : group,
+            AutoOffsetReset = AutoOffsetReset.Latest
+        };
+
+        _consumer = new ConsumerBuilder<string, PooledMessage>(consumerConfig)
+            .SetValueDeserializer(new PooledBytesDeserializer()) // Sử dụng Deserializer tối ưu GC
+            .Build();
+
+        // 2. Cấu hình Kafka Producer (Zero-Allocation Native)
+        var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers };
+        _producer = new ProducerBuilder<string, byte[]>(producerConfig).Build();
     }
 
-    public async Task StartAsync()
+    public void StartAsync()
     {
-        await _nats.ConnectAsync();
-
+        // await _nats.ConnectAsync();
         _ = Task.Run(ReceiveLoopAsync, _cts.Token);
         _ = Task.Run(SendLoopAsync, _cts.Token);
         _ = Task.Run(ProcessLoopAsync, _cts.Token);
@@ -85,17 +105,20 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         }
     }
 
-    private async Task ReceiveLoopAsync()
+    private void ReceiveLoopAsync()
     {
         var ct = _cts.Token;
         try
         {
-            await foreach (var msg in _nats.SubscribeAsync<NatsMemoryOwner<byte>>("XelerateClientSubject", queueGroup: _group,
-                               cancellationToken: ct))
+            while (!ct.IsCancellationRequested)
             {
-                using var memoryOwner = msg.Data;
+                var consumeResult = _consumer.Consume(ct);
+                if (consumeResult == null) continue;
+
+                using var pooledMessage = consumeResult.Message.Value;
+
                 var payload = _payloadPool.Get();
-                payload.MergeFrom(memoryOwner.Memory.Span);
+                payload.MergeFrom(pooledMessage.Span);
                 _receiveChannel.Writer.TryWrite(payload);
             }
         }
@@ -110,7 +133,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         var reader = _sendChannel.Reader;
         var batches = new Dictionary<(long RegionId, string UnitType), ProcessPayload>();
         var ct = _cts.Token;
-        
+
         try
         {
             while (!ct.IsCancellationRequested)
@@ -128,13 +151,13 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
                 // Xử lý item đầu tiên mở đầu cho cửa sổ Batch
                 while (readCount < maxReadsPerLoop && reader.TryRead(out var firstItem))
                 {
-                    await ProcessItemAsync(firstItem, batches, MaxBatchSize);
+                    ProcessItemAsync(firstItem, batches, MaxBatchSize);
                     readCount++;
                 }
 
                 foreach (var payload in batches.Values)
                 {
-                    await PublishBatchAsync(payload);
+                    PublishBatchAsync(payload);
                 }
 
                 batches.Clear();
@@ -145,7 +168,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         }
     }
 
-    private async Task ProcessItemAsync(SendQueueItem item, Dictionary<(long, string), ProcessPayload> batches,
+    private void ProcessItemAsync(SendQueueItem item, Dictionary<(long, string), ProcessPayload> batches,
         int maxSize)
     {
         var key = (item.RegionId, item.UnitType);
@@ -167,12 +190,12 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         // KHI VƯỢT QUÁ 50KB: Lập tức Flush batch này ngay
         if (payload.CalculateSize() >= maxSize)
         {
-            await PublishBatchAsync(payload);
+            PublishBatchAsync(payload);
             batches.Remove(key);
         }
     }
 
-    private async Task PublishBatchAsync(ProcessPayload payload)
+    private void PublishBatchAsync(ProcessPayload payload)
     {
         if (payload.UnitIds.Count == 0)
         {
@@ -182,16 +205,22 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
 
         try
         {
-            int size = payload.CalculateSize();
-            var buffer = ArrayPool<byte>.Shared.Rent(size);
             try
             {
-                payload.WriteTo(buffer.AsSpan(0, size));
-                await _nats.PublishAsync($"XelerateServerSubject.Region.{payload.RegionId}", buffer.AsMemory(0, size));
+                var message = new Message<string, byte[]>
+                {
+                    Key = $"Region.{payload.RegionId}",
+                    Value = payload.ToByteArray()
+                };
+
+                _producer.Produce("XelerateServerTopic", message, deliveryReport =>
+                {
+                    if (deliveryReport.Error.IsError) Console.WriteLine(deliveryReport.Error.Reason);
+                });
             }
-            finally
+            catch
             {
-                ArrayPool<byte>.Shared.Return(buffer);
+                Console.WriteLine("Failed to publish batch for RegionId: " + payload.RegionId);
             }
         }
         catch (Exception)
@@ -292,7 +321,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
     {
         await _cts.CancelAsync();
         _cts.Dispose();
-        await _nats.DisposeAsync();
+        // await _nats.DisposeAsync();
     }
 }
 

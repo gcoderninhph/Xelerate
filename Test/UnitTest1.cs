@@ -7,11 +7,11 @@ namespace ProcessSystem.Tests;
 // Lưu ý: Đảm bảo bạn đang chạy NATS Server ở localhost:4222
 public class ProcessSystemTests : IAsyncLifetime
 {
-    private const string NatsUrl = "nats://127.0.0.1:4222";
+    private const string KafkaUrl = "localhost:29092";
     private const string TestUnitType = "TestHero";
     private const long TestRegionId = 9999;
 
-    private Xelerate.XelerateServer _server = null!;
+    private XelerateServer _server = null!;
     private XelerateClient _client = null!;
     private IXelerateRequest _request = null!;
 
@@ -19,12 +19,12 @@ public class ProcessSystemTests : IAsyncLifetime
     public async Task InitializeAsync()
     {
         // 1. Khởi động Server
-        _server = new Xelerate.XelerateServer(NatsUrl);
-        await _server.StartAsync();
+        _server = new XelerateServer(KafkaUrl);
+        _server.StartAsync();
 
         // 2. Khởi động Client
-        _client = new XelerateClient(NatsUrl);
-        await _client.StartAsync();
+        _client = new XelerateClient(KafkaUrl);
+        _client.StartAsync();
 
         _request = _client.Create(TestUnitType);
     }

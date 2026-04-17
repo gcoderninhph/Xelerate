@@ -3,7 +3,7 @@ using System.Text;
 using Xelerate;
 
 // Cấu hình NATS
-const string natsUrl = "nats://127.0.0.1:4222";
+const string kafkaBootstrapServers = "localhost:29092";
 const string TestUnitType = "TestHero";
 const long TestRegionId = 1000;
 
@@ -11,11 +11,11 @@ Console.OutputEncoding = Encoding.UTF8;
 Console.WriteLine("🚀 BẮT ĐẦU CHẠY KỊCH BẢN KIỂM THỬ TỰ ĐỘNG...");
 
 // 1. Khởi tạo Server & Client
-var server = new XelerateServer(natsUrl);
-_ = server.StartAsync();
+var server = new XelerateServer(kafkaBootstrapServers);
+server.StartAsync();
 
-await using var client = new XelerateClient(natsUrl);
-await client.StartAsync();
+await using var client = new XelerateClient(kafkaBootstrapServers);
+client.StartAsync();
 var request = client.Create(TestUnitType);
 
 // 2. Các biến theo dõi trạng thái bất đồng bộ
