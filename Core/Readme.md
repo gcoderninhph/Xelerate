@@ -1,142 +1,127 @@
-# Mục đích dự án
-Dự án này được tạo ra nhằm mục đích cung cấp một hệ thống sự kiện phản hồi trên 1 khoảng thời gian được cài đặt trước.
+# Xelerate - Distributed Event Scheduler
 
-#### Các trường hợp hợp sử dụng
-- Game: Xử lý các hành động chờ, vd: xây dựng, nâng cấp, hồi sinh, buff/debuff...
-- Hệ thống nhắc nhở: Gửi thông báo vào một thời điểm nhất định trong tương lai.
-- Hệ thống tự động: Tự động thực thi một tác vụ nào đó vào một thời điểm nhất định, vd: tự động backup dữ liệu, tự động gửi email
+**Xelerate** là một hệ thống lập lịch sự kiện phân tán hiệu năng cao, được thiết kế để xử lý hàng triệu bộ đếm thời gian (timers) theo thời gian thực. Hệ thống sử dụng **Kafka** làm luồng giao tiếp bất đồng bộ và **MySQL** để đảm bảo tính toàn vẹn dữ liệu (Persistence) chống mất mát khi crash.
 
-# 🚀 NATS Event Processing - Client Integration Guide
-
-Tài liệu này hướng dẫn chi tiết cách tích hợp và sử dụng `XelerateClient` để giao tiếp với hệ thống xử lý sự kiện phân tán (Event-Driven) qua NATS.
-
-Hệ thống hoạt động dựa trên cơ chế **bất đồng bộ (Async)** và **thực thi hẹn giờ (Time-based)**. Client sẽ không nhận kết quả ngay lập tức mà sẽ đăng ký các Callbacks (Sự kiện) để hệ thống tự động gọi lại khi hoàn thành hoặc khi có sự cố dữ liệu.
+Hệ thống cực kỳ phù hợp cho các bài toán:
+- Hệ thống Buff / Debuff trong game (ví dụ: Hết 5 giây thì mất trạng thái đóng băng).
+- Lập lịch các tác vụ trễ (Delay Actions).
+- Timeout management.
 
 ---
 
-## 📦 1. Khởi tạo & Kết nối
+## 🚀 1. Khởi tạo Hệ thống (Initialization)
 
-Để bắt đầu, bạn cần khởi tạo Client và kết nối đến NATS Server. Mỗi loại đối tượng (ví dụ: `Monster`, `Hero`, `Building`) sẽ cần tạo ra một `IXelerateRequest` riêng biệt để quản lý.
+Để hệ thống hoạt động, bạn cần khởi chạy cả **Server** (chịu trách nhiệm đếm giờ và lưu DB) và **Client** (chịu trách nhiệm gửi lệnh và nhận kết quả).
+
+### Khởi chạy Server
+Server sẽ tự động tạo bảng MySQL và tự động nạp lại (Restore) các sự kiện đang chạy dở từ database nếu trước đó bị tắt đột ngột.
 
 ```csharp
-using Xelerate;
+string kafkaUrl = "localhost:29092";
+string mysqlUrl = "Server=localhost;Port=3306;Database=xelerate;User Id=root;Password=12345678;";
 
+var server = new XelerateServer(kafkaUrl, mysqlUrl);
+await server.EnsureTopicsExistAsync(); // Đảm bảo Kafka topics đã sẵn sàng
+await server.StartAsync();             // Bắt đầu lắng nghe và đếm giờ
+```
 
-// 1. Khởi tạo Client
-var natsUrl = "nats://127.0.0.1:4222";
+### Khởi chạy Client
+Client được dùng để tương tác với Server. Mỗi Client có thể có một `GroupId` riêng hoặc để trống (hệ thống sẽ tự tạo ID ngẫu nhiên để hoạt động như chế độ Broadcast).
 
-await using server = new XelerateServer(natsUrl);
-await server.StartAsync();
-// Group nếu không có thì tất cả client sẽ nhận được tất cả request
-await using var client = new XelerateClient(natsUrl, "Worker-1");
-await client.StartAsync();
-
-// 2. Tạo Request Handler cho một loại đối tượng cụ thể
-string unitType = "Monster";
-var monsterRequest = client.Create(unitType);
+```csharp
+// Khởi tạo Client
+var client = new XelerateClient(kafkaUrl, "my-client-group");
+await client.EnsureTopicsExistAsync();
+client.StartAsync();
 ```
 
 ---
 
-## 🎧 2. Lắng nghe Sự kiện (Client Callbacks)
+## 🎮 2. Hướng dẫn Sử dụng (Usage)
 
-Đây là phần quan trọng nhất. Vì hệ thống là bất đồng bộ, bạn **bắt buộc phải đăng ký các sự kiện này** trước khi gửi bất kỳ lệnh nào lên Server.
+Mọi thao tác gửi sự kiện đều thông qua interface `IXelerateRequest`. Các yêu cầu được gom mẻ (Batching) dưới nền để tối ưu hóa băng thông Kafka.
 
-### ✅ Sự kiện `OnDone` (Hoàn thành)
-Được Server gọi lại khi thời gian thực tế vượt qua mốc `TimeTargetMs` mà bạn đã hẹn.
+### 2.1 Tạo Request Channel
+Trước khi gửi sự kiện, bạn cần tạo một kênh Request dựa trên `unitType` (Nhóm loại sự kiện, VD: `"PlayerBuff"`, `"MonsterRespawn"`).
 
 ```csharp
-client.OnDone("Monster", (response) => 
+var request = client.Create("PlayerBuff");
+```
+
+### 2.2 Đặt lịch sự kiện (Send / Upsert)
+Sử dụng hàm `Send` để lên lịch nổ cho một sự kiện.
+**Lưu ý:** Hàm `Send` hoạt động như một lệnh **Upsert**. Nếu `UnitId` đã tồn tại, nó sẽ **cập nhật đè** (Override) thời gian và dữ liệu mới nhất.
+
+```csharp
+long regionId = 1;              // ID của phân khu (VD: MapID, RoomID)
+long unitId = 99;               // ID của đối tượng (VD: PlayerID)
+byte[] payloadData = { 1, 2, 3 }; // Dữ liệu đính kèm (có thể rỗng)
+
+// Tính toán thời gian nổ trong tương lai (Ví dụ: 5 giây sau kể từ hiện tại)
+long targetMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000;
+
+// Gửi lệnh
+request.Send(regionId, unitId, targetMs, payloadData);
+```
+
+### 2.3 Hủy bỏ sự kiện (Cancel)
+Nếu bạn muốn xóa bỏ một sự kiện trước khi nó kịp nổ (Ví dụ: Người chơi dùng vật phẩm giải buff sớm), hãy dùng lệnh `Cancel`.
+
+```csharp
+request.Cancel(regionId, unitId);
+```
+*Hệ thống có cơ chế khử trùng lặp (De-duplication). Nếu bạn gửi `Send` và `Cancel` liên tục trong 1 tích tắc, chỉ có hành động cuối cùng được thực thi.*
+
+---
+
+## ⚡ 3. Các Sự kiện (Events)
+
+Sự kiện duy nhất và quan trọng nhất mà Client cần quan tâm là `OnDone`. Sự kiện này sẽ được Server bắn ngược lại Client khi **thời gian của hệ thống vượt qua mốc `TimeTargetMs`** mà bạn đã thiết lập ở lệnh `Send`.
+
+### Lắng nghe sự kiện (OnDone)
+**Quy tắc:** Bạn LUÔN LUÔN phải đăng ký `OnDone` *trước* khi bắt đầu nhận kết quả để tránh miss message.
+
+```csharp
+// Đăng ký Callback đồng bộ (Action)
+client.OnDone("PlayerBuff", response =>
 {
-    Console.WriteLine($"[DONE] Quái vật {response.UnitId} đã xử lý xong!");
-    Console.WriteLine($"[DONE] Dữ liệu trả về: {response.Data.Length} bytes");
-    Console.WriteLine($"[DONE] Thuộc Region: {response.RegionId} | Version: {response.Version}");
+    Console.WriteLine($"[Buff Hết Hạn] Region: {response.RegionId}, Unit: {response.UnitId}");
+    
+    // Đọc dữ liệu đính kèm nếu có
+    if (response.Data.Length > 0)
+    {
+        var data = response.Data.ToArray();
+        // Xử lý data...
+    }
+});
+
+// Hoặc đăng ký Callback bất đồng bộ (Func<Task>)
+client.OnDone("PlayerBuff", async response =>
+{
+    await SomeAsyncLogic(response.UnitId);
 });
 ```
 
-### ⚠️ Sự kiện `OnRequire` (Yêu cầu phục hồi / Cập nhật)
-Sự kiện này là cơ chế "Tự chữa lành" (Self-healing) của hệ thống. Khác với `OnDone` chỉ nhận dữ liệu, `OnRequire` **bắt buộc Client phải trả về dữ liệu (Return)** để Server xử lý tiếp.
+---
 
-**Sự kiện này nổ ra trong 2 trường hợp:**
-1. **Mất dữ liệu (Require):** Client gửi lệnh `Ping` nhưng Server không tìm thấy UnitId này trên RAM (có thể do Server vừa restart, hoặc UnitId đã bị xóa do quá 10 giây không được Ping).
-2. **Sai lệch phiên bản (NeedUpdate):** Client gửi lệnh `Ping` mang Version 2, nhưng Server lại đang lưu Version 1.
+## 🛑 4. Tắt hệ thống an toàn (Graceful Shutdown)
+
+Hệ thống Xelerate lưu trữ dữ liệu trên RAM để đảm bảo độ trễ siêu thấp và dùng luồng nền để đồng bộ xuống MySQL. Do đó, khi tắt ứng dụng, bạn **BẮT BUỘC** phải gọi `DisposeAsync` để hệ thống vét cạn (Drain) dữ liệu còn sót lại trên RAM xuống DB an toàn.
 
 ```csharp
-client.OnRequire("Monster", (response) => 
-{
-    Console.WriteLine($"[REQUIRE] Server yêu cầu dữ liệu cho Unit {response.UnitId} (Version {response.Version})");
+// Tắt Client trước để ngừng nhận/gửi request mới
+await client.DisposeAsync();
 
-    // BƯỚC 1: Lấy dữ liệu mới nhất từ DB hoặc Cache của Client
-    var recoveryData = GetMonsterDataFromDB(response.UnitId); 
-    
-    // BƯỚC 2: Tính toán lại thời gian hoàn thành (nếu cần)
-    long newTargetTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 3000; // hẹn 3 giây nữa
-    
-    // BƯỚC 3: Trả về XelerateData để Client tự động đóng gói và gửi lại cho Server
-    return new XelerateData(response.UnitId, response.Version, newTargetTime, recoveryData);
-});
+// Tắt Server sau. Server sẽ tự động hoàn tất các lệnh ghi Batch xuống MySQL trước khi tắt hẳn.
+await server.DisposeAsync();
 ```
 
 ---
 
-## 🕹 3. Các Hành động của Client (Client Actions)
-
-Sau khi đã đăng ký lắng nghe sự kiện, bạn sử dụng `monsterRequest` để tương tác với Server.
-
-### 📤 `Send` (Cập nhật / Hẹn giờ)
-Lệnh cốt lõi dùng để đẩy dữ liệu lên Server và thiết lập mốc thời gian hoàn thành.
-*Lưu ý: Lệnh này cũng tự động reset bộ đếm Ping (10 giây).*
-
-```csharp
-long regionId = 1001;
-long unitId = 99;
-int version = 1;
-byte[] data = Encoding.UTF8.GetBytes("Data của Monster 99");
-
-// Đặt mốc thời gian: 5 giây kể từ hiện tại
-long targetTimeMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() + 5000; 
-
-// Gửi lên Server (Sẽ trigger OnDone sau 5 giây)
-monsterRequest.Send(regionId, unitId, version, targetTimeMs, data);
-```
-
-### 💓 `Ping` (Duy trì kết nối & Kiểm tra đồng bộ)
-Server có một bộ đếm ngầm: **Nếu một UnitId không được nhận lệnh Send hoặc Ping trong vòng 10 giây, nó sẽ bị XÓA THẦM LẶNG để giải phóng RAM.**
-
-Bạn cần gọi `Ping` định kỳ để:
-1. Giữ UnitId không bị xóa.
-2. Kiểm tra xem Version giữa Client và Server có bị lệch không.
-
-```csharp
-// Gửi Ping. Nếu Server không biết Unit này hoặc lệch Version, nó sẽ kích hoạt sự kiện OnRequire.
-monsterRequest.Ping(regionId, unitId, version);
-```
-
-### ❌ `Cancel` (Hủy bỏ tức thời)
-Nếu bạn không muốn đợi đến khi `TimeTargetMs` kết thúc và muốn hủy bỏ ngay tác vụ này, hãy gọi Cancel.
-Sự kiện `OnDone` sẽ KHÔNG BAO GIỜ được gọi cho UnitId này nữa.
-
-```csharp
-monsterRequest.Cancel(regionId, unitId, version);
-```
-
----
-
-## 🔄 4. Tóm tắt Vòng đời chuẩn (Happy Path)
-
-Để dễ hình dung, một kịch bản giao tiếp hoàn hảo sẽ diễn ra như sau:
-
-1. **Client:** Gọi `Send` mang theo dữ liệu, hẹn 15 giây sau thực thi.
-2. **Server:** Nhận lệnh, lưu dữ liệu vào RAM, bắt đầu đếm ngược 15 giây và đếm ngược Ping (10 giây).
-3. **Client:** 8 giây sau, gọi `Ping`.
-4. **Server:** Nhận `Ping`, gia hạn tuổi thọ của đối tượng thêm 10 giây nữa (Tránh bị chết ngầm).
-5. **Server:** Đạt mốc 15 giây. Lấy dữ liệu ra, đóng gói, gọi hàm `Done()` đẩy về qua NATS.
-6. **Client:** Nhận tin nhắn từ NATS, kích hoạt hàm callback `OnDone` và in ra màn hình.
-
----
-
-## 🛠 5. Cơ chế gom gói (Batching) dưới nền
-
-Bạn có thể tự do gọi `Send`, `Ping`, `Cancel` hàng ngàn lần cùng lúc (ví dụ trong vòng lặp `for`) mà không lo nghẽn mạng.
-
-`XelerateClient` đã được tích hợp bộ đệm `Channel` kết hợp với thuật toán gộp gói tin (Batching) của Protobuf. Nó sẽ gom nhiều request lại thành một gói tin tối đa **50KB** trước khi thực sự bắn qua NATS, giúp tối ưu hóa thông lượng (Throughput) lên mức cực hạn.
+## 🛠️ Luồng hoạt động Tóm tắt (Flow)
+1. `Client` gọi `request.Send()`.
+2. Lệnh được đưa vào Batch (tối đa 50KB) và gửi qua Kafka (`XelerateServerTopic`).
+3. `Server` nhận lệnh, cập nhật `TimedSortedSet` trên RAM và đẩy vào Channel để luồng ngầm lưu xuống MySQL.
+4. Khi đồng hồ thời gian thực (`now`) vượt qua `TimeTargetMs`, `TimedSortedSet` nổ event.
+5. `Server` bắn gói tin chứa trạng thái `Done` qua Kafka (`XelerateClientTopic`), đồng thời xóa Record dưới MySQL.
+6. `Client` nhận được tin nhắn và kích hoạt hàm `OnDone()` mà bạn đã định nghĩa.
