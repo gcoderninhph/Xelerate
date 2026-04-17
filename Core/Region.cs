@@ -91,7 +91,7 @@ public class Region : IAsyncDisposable
 
         if (timeTargetMs < now)
         {
-            Done(currentItem); // Hết hạn rồi thì bắn Done luôn
+            _channel.Writer.TryWrite(new RegionMessage(RegionMessageType.DoneItem, currentItem));
         }
         else
         {

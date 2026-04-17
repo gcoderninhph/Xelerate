@@ -27,7 +27,7 @@ public interface IXelerateRequest
 public class XelerateClient : IXelerateClient, IAsyncDisposable
 {
     // private readonly NatsConnection _nats;
-    private readonly IConsumer<string, PooledMessage> _consumer;
+    private readonly IConsumer<string, byte[]> _consumer;
     private readonly IProducer<string, byte[]> _producer;
 
     private readonly CancellationTokenSource _cts = new();
@@ -59,8 +59,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
             AutoOffsetReset = AutoOffsetReset.Earliest
         };
 
-        _consumer = new ConsumerBuilder<string, PooledMessage>(consumerConfig)
-            .SetValueDeserializer(new PooledBytesDeserializer()) // Sử dụng Deserializer tối ưu GC
+        _consumer = new ConsumerBuilder<string, byte[]>(consumerConfig)
             .Build();
 
         _consumer.Subscribe("XelerateClientTopic");
@@ -115,11 +114,8 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
             {
                 var consumeResult = _consumer.Consume(ct);
                 if (consumeResult == null) continue;
-
-                using var pooledMessage = consumeResult.Message.Value;
-
                 var payload = _payloadPool.Get();
-                payload.MergeFrom(pooledMessage.Span);
+                payload.MergeFrom(consumeResult.Message.Value);
                 _receiveChannel.Writer.TryWrite(payload);
             }
         }

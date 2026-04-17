@@ -6,7 +6,7 @@ namespace Xelerate;
 
 public class XelerateServer : IAsyncDisposable
 {
-    private readonly IConsumer<string, PooledMessage> _consumer;
+    private readonly IConsumer<string, byte[]> _consumer;
     private readonly IProducer<string, byte[]> _producer;
 
     // private NatsConnection _nats = new(new NatsOpts { Url = natsUrl });
@@ -36,8 +36,7 @@ public class XelerateServer : IAsyncDisposable
         };
 
         // Gắn PooledBytesDeserializer vào Consumer
-        _consumer = new ConsumerBuilder<string, PooledMessage>(consumerConfig)
-            .SetValueDeserializer(new PooledBytesDeserializer())
+        _consumer = new ConsumerBuilder<string, byte[]>(consumerConfig)
             .Build();
 
         _consumer.Subscribe("XelerateServerTopic");
@@ -63,7 +62,7 @@ public class XelerateServer : IAsyncDisposable
         var ct = _cts.Token;
 
         // 3. Khởi chạy luồng gom mẻ Database (1 luồng duy nhất)
-        _dbBatchTask = Task.Run(() => DbBatchLoopAsync(ct), ct);
+        _dbBatchTask = Task.Run(DbBatchLoopAsync, ct);
 
         // 4. Khởi chạy luồng xử lý Kafka
         _consumeTask = Task.Run(() =>
@@ -73,12 +72,11 @@ public class XelerateServer : IAsyncDisposable
                 var consumeResult = _consumer.Consume(ct);
                 if (consumeResult == null) continue;
 
-                using var pooledMessage = consumeResult.Message.Value;
                 var keyParts = consumeResult.Message.Key.Split('.');
                 if (keyParts.Length == 2 && long.TryParse(keyParts[1], out var regionId))
                 {
                     var region = GetOrAddRegion(regionId);
-                    region.EnqueueEvent(pooledMessage.Span);
+                    region.EnqueueEvent(consumeResult.Message.Value);
                 }
             }
         }, ct);
@@ -141,59 +139,49 @@ public class XelerateServer : IAsyncDisposable
         }
     }
 
-    private async Task DbBatchLoopAsync(CancellationToken ct)
+    private async Task DbBatchLoopAsync()
     {
         var batch = new List<DbOperation>();
         var reader = _dbChannel.Reader;
 
-        while (!ct.IsCancellationRequested)
+        // WaitToReadAsync không có Token. Nó chỉ trả về 'false' khi ống nước bị 
+        // khóa nắp (Writer.TryComplete) VÀ bên trong đã bị hút cạn khô nước.
+        while (await reader.WaitToReadAsync())
         {
-            try
+            if (reader.TryRead(out var firstOp))
             {
-                // Bước 1: Đợi item đầu tiên mở màn cho một mẻ (không có timeout)
-                if (await reader.WaitToReadAsync(ct))
+                batch.Add(firstOp);
+
+                // Rút ngắn thời gian ngâm Batch xuống 2 giây (chuyên nghiệp hơn 1 phút)
+                using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+
+                try
                 {
-                    if (reader.TryRead(out var firstOp))
+                    // Tăng sức chứa mẻ lên 500 để giải phóng nhanh khi có traffic cao
+                    while (batch.Count < 500)
                     {
-                        batch.Add(firstOp);
-
-                        // Bước 2: Bật đồng hồ đếm ngược 1 phút
-                        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                        timeoutCts.CancelAfter(TimeSpan.FromMinutes(1));
-
-                        try
+                        if (await reader.WaitToReadAsync(timeoutCts.Token))
                         {
-                            // Thu thập liên tục cho đến khi đủ 200 items hoặc hết 1 phút
-                            while (batch.Count < 200)
+                            while (batch.Count < 500 && reader.TryRead(out var op))
                             {
-                                if (await reader.WaitToReadAsync(timeoutCts.Token))
-                                {
-                                    while (batch.Count < 200 && reader.TryRead(out var op))
-                                    {
-                                        batch.Add(op);
-                                    }
-                                }
+                                batch.Add(op);
                             }
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            /* Bị ngắt do hết 1 phút hoặc server tắt */
                         }
                     }
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                /* Server tắt */
-            }
+                catch (OperationCanceledException)
+                {
+                    // Hết 2 giây thì đi tiếp để ghi DB, không lỗi lầm gì cả
+                }
 
-            // Bước 3: Đã đủ điều kiện (200 items hoặc 1 phút) -> Tiến hành ghi DB
-            if (batch.Count > 0)
-            {
-                await SaveBatchToMySqlAsync(batch);
-                batch.Clear();
+                if (batch.Count > 0)
+                {
+                    await SaveBatchToMySqlAsync(batch);
+                    batch.Clear();
+                }
             }
         }
+        // Khi thoát khỏi vòng lặp này, 100% dữ liệu đã nằm an toàn dưới MySQL.
     }
 
     private async Task SaveBatchToMySqlAsync(List<DbOperation> batch)
@@ -253,11 +241,10 @@ public class XelerateServer : IAsyncDisposable
         }
     }
 
-    // THÊM HÀM NÀY ĐỂ DỌN DẸP
     public async ValueTask DisposeAsync()
     {
+        // 1. Tắt luồng Consume Kafka để chặn không nhận thêm event mới
         await _cts.CancelAsync();
-
         if (_consumeTask != null)
             try
             {
@@ -265,11 +252,20 @@ public class XelerateServer : IAsyncDisposable
             }
             catch
             {
-                //
             }
 
-        // Ép Channel đóng để DB loop thoát ra khỏi WaitToReadAsync
+        // 2. Tắt các Region. Các luồng ngầm của Region sẽ tranh thủ 
+        // đẩy NHỮNG LỆNH XÓA CUỐI CÙNG vào ống nước DB Channel.
+        foreach (var region in _regions.Values)
+        {
+            await region.DisposeAsync();
+        }
+
+        // 3. KHÓA NẮP ỐNG NƯỚC DB
+        // Báo hiệu cho DbBatchLoopAsync biết: "Không còn ai gửi data nữa, vét nốt đi!"
         _dbChannel.Writer.TryComplete();
+
+        // 4. CHỜ LUỒNG DB VÉT CẠN VÀ GHI MẺ CUỐI XUỐNG MYSQL
         if (_dbBatchTask != null)
             try
             {
@@ -277,19 +273,14 @@ public class XelerateServer : IAsyncDisposable
             }
             catch
             {
-                //
             }
 
+        // 5. Lúc này 100% an toàn. Dọn dẹp nốt Kafka
         _consumer.Close();
         _consumer.Dispose();
 
         _producer.Flush(TimeSpan.FromSeconds(10));
         _producer.Dispose();
         _cts.Dispose();
-
-        foreach (var region in _regions.Values)
-        {
-            await region.DisposeAsync();
-        }
     }
 }
