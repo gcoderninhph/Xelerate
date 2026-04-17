@@ -1,4 +1,6 @@
-﻿using Xelerate;
+﻿using Confluent.Kafka;
+using Confluent.Kafka.Admin;
+using Xelerate;
 using Xunit;
 using Assert = Xunit.Assert;
 
@@ -20,6 +22,7 @@ public class ProcessSystemTests : IAsyncLifetime
     {
         // 1. Khởi động Server
         _server = new XelerateServer(KafkaUrl);
+        await _server.EnsureTopicsExistAsync();
         _server.StartAsync();
 
         // 2. Khởi động Client

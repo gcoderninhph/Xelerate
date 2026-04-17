@@ -11,6 +11,7 @@ namespace Xelerate;
 public interface IXelerateClient
 {
     void StartAsync();
+    Task EnsureTopicsExistAsync();
     void OnRequire(string unitType, Func<XelerateResponse, Task<XelerateData>> onRequire);
 
     // SỬA ĐỔI: Đổi Action thành Func để có thể trả về ProcessData cho Server
@@ -48,11 +49,13 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
     private readonly Channel<ProcessPayload> _receiveChannel = Channel.CreateUnbounded<ProcessPayload>();
     private readonly Channel<SendQueueItem> _sendChannel = Channel.CreateUnbounded<SendQueueItem>();
     const int MaxBatchSize = 50 * 1024; // 50KB
-    // private string? _group;
+    private Task[]? _backgroundTasks;
+    private readonly string _kafkaBootstrapServers;
 
 
     public XelerateClient(string kafkaBootstrapServers, string? group = null)
     {
+        _kafkaBootstrapServers = kafkaBootstrapServers;
         // _nats = new NatsConnection(new NatsOpts { Url = natsUrl });
         DefaultObjectPoolProvider provider = new();
         _payloadPool = provider.Create(new XeleratePayloadPooledObjectPolicy());
@@ -71,6 +74,8 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
             .SetValueDeserializer(new PooledBytesDeserializer()) // Sử dụng Deserializer tối ưu GC
             .Build();
 
+        _consumer.Subscribe("XelerateClientTopic");
+
         // 2. Cấu hình Kafka Producer (Zero-Allocation Native)
         var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers };
         _producer = new ProducerBuilder<string, byte[]>(producerConfig).Build();
@@ -78,10 +83,17 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
 
     public void StartAsync()
     {
-        // await _nats.ConnectAsync();
-        _ = Task.Run(ReceiveLoopAsync, _cts.Token);
-        _ = Task.Run(SendLoopAsync, _cts.Token);
-        _ = Task.Run(ProcessLoopAsync, _cts.Token);
+        _backgroundTasks = new[]
+        {
+            Task.Run(ReceiveLoopAsync, _cts.Token),
+            Task.Run(SendLoopAsync, _cts.Token),
+            Task.Run(ProcessLoopAsync, _cts.Token)
+        };
+    }
+
+    public Task EnsureTopicsExistAsync()
+    {
+        return KafkaExtension.EnsureTopicsExistAsync(_kafkaBootstrapServers);
     }
 
     private async Task ProcessLoopAsync()
@@ -319,9 +331,33 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        // 1. Kích hoạt hủy token
         await _cts.CancelAsync();
+
+        // 2. Chờ cả 3 luồng ngầm dừng hẳn
+        if (_backgroundTasks != null)
+        {
+            try
+            {
+                await Task.WhenAll(_backgroundTasks);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
+        // 3. Dọn dẹp Kafka (BẮT BUỘC)
+        _consumer.Close();
+        _consumer.Dispose();
+
+        _producer.Flush(TimeSpan.FromSeconds(5));
+        _producer.Dispose();
+
+        // 4. Đóng các Channel
+        _receiveChannel.Writer.TryComplete();
+        _sendChannel.Writer.TryComplete();
+
         _cts.Dispose();
-        // await _nats.DisposeAsync();
     }
 }
 

@@ -10,14 +10,17 @@ public class XelerateServer : IAsyncDisposable
     // private NatsConnection _nats = new(new NatsOpts { Url = natsUrl });
     private CancellationTokenSource _cts = new();
     private Dictionary<long, Region> _regions = new();
+    private Task? _consumeTask;
+    private readonly string _kafkaBootstrapServers;
 
     public XelerateServer(string kafkaBootstrapServers)
     {
+        _kafkaBootstrapServers = kafkaBootstrapServers;
         var consumerConfig = new ConsumerConfig
         {
             BootstrapServers = kafkaBootstrapServers,
             GroupId = "xelerate-server-group",
-            AutoOffsetReset = AutoOffsetReset.Latest
+            AutoOffsetReset = AutoOffsetReset.Latest,
         };
 
         // Gắn PooledBytesDeserializer vào Consumer
@@ -25,11 +28,17 @@ public class XelerateServer : IAsyncDisposable
             .SetValueDeserializer(new PooledBytesDeserializer())
             .Build();
 
+        _consumer.Subscribe("XelerateServerTopic");
+
         var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers };
         _producer = new ProducerBuilder<string, byte[]>(producerConfig)
             .Build();
     }
 
+    public Task EnsureTopicsExistAsync()
+    {
+        return KafkaExtension.EnsureTopicsExistAsync(_kafkaBootstrapServers);
+    }
 
     public void StartAsync()
     {
@@ -38,7 +47,7 @@ public class XelerateServer : IAsyncDisposable
 
         var ct = _cts.Token;
 
-        _ = Task.Run(() =>
+        _consumeTask = Task.Run(() =>
         {
             while (!ct.IsCancellationRequested)
             {
@@ -64,13 +73,26 @@ public class XelerateServer : IAsyncDisposable
     // THÊM HÀM NÀY ĐỂ DỌN DẸP
     public async ValueTask DisposeAsync()
     {
+        await _cts.CancelAsync();
+
+        // 2. CHỜ cho luồng Consume thực sự thoát khỏi vòng lặp
+        if (_consumeTask != null)
+        {
+            try
+            {
+                await _consumeTask;
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+
         _consumer.Close();
         _consumer.Dispose();
 
         _producer.Flush(TimeSpan.FromSeconds(10));
         _producer.Dispose();
 
-        await _cts.CancelAsync();
         _cts.Dispose();
 
         foreach (var region in _regions.Values)
