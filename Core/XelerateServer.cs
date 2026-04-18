@@ -41,7 +41,24 @@ public class XelerateServer : IAsyncDisposable
 
         _consumer.Subscribe("XelerateServerTopic");
 
-        var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers, Acks = Acks.All };
+        var producerConfig = new ProducerConfig
+        {
+            BootstrapServers = kafkaBootstrapServers,
+            Acks = Acks.All,
+            // retry
+            EnableIdempotence = true,
+            MessageSendMaxRetries = int.MaxValue,
+
+            // timeout
+            RequestTimeoutMs = 30000,
+
+            // tránh reorder khi retry
+            MaxInFlight = 5, // hoặc 1 nếu muốn cực safe
+            
+            // 
+            LingerMs = 5,
+            BatchSize = 200 * 1024
+        };
         _producer = new ProducerBuilder<string, byte[]>(producerConfig)
             .Build();
     }

@@ -31,7 +31,7 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
     private readonly IProducer<string, byte[]> _producer;
 
     private readonly CancellationTokenSource _cts = new();
-    
+
     private readonly ConcurrentDictionary<string, Func<XelerateResponse, Task>> _doneHandlersAsync = new();
     private readonly ObjectPool<ProcessPayload> _payloadPool;
 
@@ -65,7 +65,24 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
         _consumer.Subscribe("XelerateClientTopic");
 
         // 2. Cấu hình Kafka Producer (Zero-Allocation Native)
-        var producerConfig = new ProducerConfig { BootstrapServers = kafkaBootstrapServers, Acks = Acks.All };
+        var producerConfig = new ProducerConfig
+        {
+            BootstrapServers = kafkaBootstrapServers,
+            Acks = Acks.All,
+            // retry
+            EnableIdempotence = true,
+            MessageSendMaxRetries = int.MaxValue,
+
+            // timeout
+            RequestTimeoutMs = 30000,
+
+            // tránh reorder khi retry
+            MaxInFlight = 5, // hoặc 1 nếu muốn cực safe
+
+            // 
+            LingerMs = 5,
+            BatchSize = 200 * 1024 // 200KB
+        };
         _producer = new ProducerBuilder<string, byte[]>(producerConfig).Build();
     }
 
@@ -244,8 +261,8 @@ public class XelerateClient : IXelerateClient, IAsyncDisposable
                     var unitId = payload.UnitIds[i];
                     var data = payload.DataList[i]?.Memory ?? ReadOnlyMemory<byte>.Empty;
 
-                    var response = new XelerateResponse(regionId, unitId,  data);
-                    
+                    var response = new XelerateResponse(regionId, unitId, data);
+
                     if (type == ProcessType.Done)
                     {
                         if (_doneHandlersAsync.TryGetValue(unitType, out var handler))
@@ -333,7 +350,7 @@ public class XelerateRequest(string unitType, Action<SendQueueItem> enqueueActio
     }
 }
 
-public readonly struct XelerateResponse(long regionId, long unitId,  ReadOnlyMemory<byte> data)
+public readonly struct XelerateResponse(long regionId, long unitId, ReadOnlyMemory<byte> data)
 {
     public long RegionId { get; } = regionId;
     public long UnitId { get; } = unitId;
